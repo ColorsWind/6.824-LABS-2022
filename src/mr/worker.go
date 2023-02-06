@@ -1,6 +1,12 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
@@ -33,18 +39,94 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
-	WorkerGoOnline()
+	workerID, nReduce := WorkerGoOnline()
+	for true {
+		task := RequestTask(workerID)
+		switch task.Action {
+		case "exit":
+			break
+		case "wait":
+			time.Sleep(time.Second)
+		case "map":
+			DoMapTask(workerID, nReduce, task, mapf)
+		}
+	}
+
 }
 
-func WorkerGoOnline() {
+func DoMapTask(workerID int64, nReduce int64, task RequestTaskReply, mapf func(string, string) []KeyValue) {
+	file, err := os.Open(task.MapTaskFile)
+	if err != nil {
+		log.Fatalf("#%v:\tcannot open %v\n", workerID, task.MapTaskFile)
+		return
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("#%v:\tcannot read %v\n", workerID, task.MapTaskFile)
+		return
+	}
+	err = file.Close()
+	if err != nil {
+		log.Fatalf("#%v:\tcannot close %v\n", workerID, task.MapTaskFile)
+		return
+	}
+	var writers []*os.File
+	var encoders []*json.Encoder
+	for i := int64(0); i < nReduce; i++ {
+		intermediateFileName := fmt.Sprintf("mr-%v-%v", task.MapTaskID, i)
+		file, err := os.Open(intermediateFileName)
+		if err != nil {
+			log.Fatalf("#%v:\tcannot open %v\n", workerID, intermediateFileName)
+			return
+		}
+		enc := json.NewEncoder(file)
+		encoders = append(encoders, enc)
+		writers = append(writers, file)
+	}
+
+	kva := mapf(task.MapTaskFile, string(content))
+	for _, kv := range kva {
+		i := ihash(kv.Key)
+		err := encoders[i].Encode(&kv)
+		if err != nil {
+			log.Fatalf("#%v:\tcannot encode %v\n", workerID, kva)
+			return
+		}
+	}
+	for _, w := range writers {
+		err := w.Close()
+		if err != nil {
+			log.Fatalf("#%v:\tcannot close %v\n", workerID, w)
+			return
+		}
+	}
+	ok := call("Coordinator.MapTaskDone", &MapTaskDoneArgs{workerID, task.MapTaskID}, &MapTaskDoneReply{})
+	log.Printf("#%v:\tMap task done %v, err=%v.\n", workerID, task.MapTaskID, ok)
+}
+
+func RequestTask(workerID int64) RequestTaskReply {
+	args := RequestTaskArgs{}
+	args.WorkerID = workerID
+	reply := RequestTaskReply{}
+	ok := call("Coordinator.RequestTask", &args, &reply)
+	if ok {
+		log.Printf("#%v:\t Request task success, %v", workerID, reply.Action)
+	} else {
+		panic(fmt.Sprintf("Worker go online fails, err=%v", ok))
+	}
+	return reply
+}
+
+func WorkerGoOnline() (int64, int64) {
 	args := WorkerGoOnlineArgs{}
 	reply := WorkerGoOnlineReply{}
 	ok := call("Coordinator.WorkerGoOnline", &args, &reply)
 	if ok {
-		fmt.Printf("Worker go online. WorkerID=%v\n", reply.WorkerID)
+		log.Printf("Worker go online. WorkerID=%v\n", reply.WorkerID)
 	} else {
-		panic(fmt.Sprintf("Worker go online fails, err=%v", ok))
+		log.Panicf("Worker go online fails, err=%v\n", ok)
 	}
+	return reply.WorkerID, reply.ReduceN
 }
 
 //

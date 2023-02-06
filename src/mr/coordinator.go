@@ -10,14 +10,19 @@ import "net/rpc"
 import "net/http"
 
 type Coordinator struct {
-	WorkerCount int32
+	WorkerCount int64
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
 func (c *Coordinator) WorkerGoOnline(args *WorkerGoOnlineArgs, reply *WorkerGoOnlineReply) error {
-	WorkerID := atomic.AddInt32(&c.WorkerCount, 1) - 1
-	reply.WorkerID = int(WorkerID)
+	WorkerID := atomic.AddInt64(&c.WorkerCount, 1) - 1
+	reply.WorkerID = WorkerID
+	return nil
+}
+
+func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
+	reply.Action = "wait"
 	return nil
 }
 
