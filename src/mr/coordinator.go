@@ -39,7 +39,6 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		// send map task
 		mapTaskID := c.planMapTasks[0]
 		c.planMapTasks = c.planMapTasks[1:]
-
 		reply.Action = "map"
 		reply.MapTaskID = mapTaskID
 		reply.MapTaskFile = c.inputFiles[mapTaskID]

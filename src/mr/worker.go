@@ -57,26 +57,26 @@ func Worker(mapf func(string, string) []KeyValue,
 func DoMapTask(workerID int64, nReduce int64, task RequestTaskReply, mapf func(string, string) []KeyValue) {
 	file, err := os.Open(task.MapTaskFile)
 	if err != nil {
-		log.Fatalf("#%v:\tCannot open %v\n", workerID, task.MapTaskFile)
+		log.Fatalf("#%v:\tCannot open: %v\n", workerID, task.MapTaskFile)
 		return
 	}
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalf("#%v:\tCannot read %v\n", workerID, task.MapTaskFile)
+		log.Fatalf("#%v:\tCannot read: %v\n", workerID, task.MapTaskFile)
 		return
 	}
 	err = file.Close()
 	if err != nil {
-		log.Fatalf("#%v:\tCannot close %v\n", workerID, task.MapTaskFile)
+		log.Fatalf("#%v:\tCannot close: %v\n", workerID, task.MapTaskFile)
 		return
 	}
 	var writers []*os.File
 	var encoders []*json.Encoder
 	for i := int64(0); i < nReduce; i++ {
 		intermediateFileName := fmt.Sprintf("mr-%v-%v", task.MapTaskID, i)
-		file, err := os.OpenFile(intermediateFileName, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0644)
+		file, err := ioutil.TempFile("", intermediateFileName)
 		if err != nil {
-			log.Fatalf("#%v:\tCannot open %v\n", workerID, intermediateFileName)
+			log.Fatalf("#%v:\tCannot create temporary file for: %v.\n", workerID, intermediateFileName)
 			return
 		}
 		enc := json.NewEncoder(file)
@@ -90,14 +90,20 @@ func DoMapTask(workerID int64, nReduce int64, task RequestTaskReply, mapf func(s
 		i := ihash(kv.Key) % int(nReduce)
 		err := encoders[i].Encode(&kv)
 		if err != nil {
-			log.Fatalf("#%v:\tCannot encode %v\n", workerID, kva)
+			log.Fatalf("#%v:\tCannot encode: %v\n", workerID, kva)
 			return
 		}
 	}
-	for _, w := range writers {
+	for i, w := range writers {
+		intermediateFileName := fmt.Sprintf("mr-%v-%v", task.MapTaskID, i)
 		err := w.Close()
 		if err != nil {
-			log.Fatalf("#%v:\tCannot close %v\n", workerID, w)
+			log.Fatalf("#%v:\tCannot close: %v\n", workerID, w)
+			return
+		}
+		err = os.Rename(w.Name(), intermediateFileName)
+		if err != nil {
+			log.Fatalf("#%v:\tCannot rename: %v\n", workerID, intermediateFileName)
 			return
 		}
 	}
