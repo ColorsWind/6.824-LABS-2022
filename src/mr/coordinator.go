@@ -149,10 +149,9 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	ret := len(c.planReduceTasks) == 0 && len(c.planMapTasks) == 0 && len(c.currMapTasks) == 0 && len(c.currReduceTasks) == 0
 	return ret
 }
 
