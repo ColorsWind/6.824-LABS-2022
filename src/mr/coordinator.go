@@ -14,11 +14,15 @@ import "net/http"
 type Coordinator struct {
 	workerCount int64
 	mutex       sync.Mutex
+	nMap        int64
+	nReduce     int64
 
 	inputFiles   []string
 	planMapTasks []int64
 	currMapTasks map[int64]int64
-	nReduce      int64
+
+	planReduceTasks []int64
+	currReduceTasks map[int64]int64
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -26,6 +30,7 @@ type Coordinator struct {
 func (c *Coordinator) WorkerGoOnline(args *WorkerGoOnlineArgs, reply *WorkerGoOnlineReply) error {
 	workerID := atomic.AddInt64(&c.workerCount, 1) - 1
 	reply.WorkerID = workerID
+	reply.MapN = c.nMap
 	reply.ReduceN = c.nReduce
 	log.Printf("#%v:\tAssigned worker id.\n", workerID)
 	return nil
@@ -55,10 +60,33 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				log.Printf("#%v:\tMap task timeout: %v.\n", workerID, mapTaskID)
 			}
 		}()
+	} else if len(c.currMapTasks) > 0 {
+		// wait all map tasks end
+		reply.Action = "wait_map"
+	} else if len(c.planReduceTasks) > 0 {
+		// send reduce task
+		reduceTaskID := c.planReduceTasks[0]
+		c.planReduceTasks = c.planReduceTasks[1:]
+		reply.Action = "reduce"
+		reply.ReduceTaskID = reduceTaskID
+		c.currReduceTasks[workerID] = reduceTaskID
+		log.Printf("#%v:\tAssigned reduce task: %v.\n", workerID, reduceTaskID)
+		go func() {
+			time.Sleep(10 * time.Second)
+			c.mutex.Lock()
+			defer c.mutex.Unlock()
+			if element, present := c.currReduceTasks[workerID]; present && element == reduceTaskID {
+				// timeout
+				c.planReduceTasks = append(c.planReduceTasks, reduceTaskID)
+				delete(c.currReduceTasks, workerID)
+				log.Printf("#%v:\tReduce task timeout: %v.\n", workerID, reduceTaskID)
+			}
+		}()
+	} else if len(c.currReduceTasks) > 0 {
+		reply.Action = "wait_reduce"
 	} else {
-		reply.Action = "wait"
+		reply.Action = "exit"
 	}
-
 	return nil
 }
 
@@ -71,6 +99,20 @@ func (c *Coordinator) MapTaskDone(args *MapTaskDoneArgs, reply *MapTaskDoneReply
 		log.Printf("#%v:\tReceived successful map task: %v.\n", workerID, args.MapTaskID)
 	} else {
 		log.Printf("#%v:\tReceived timeout map task: %v.\n", workerID, args.MapTaskID)
+	}
+
+	return nil
+}
+
+func (c *Coordinator) ReduceTaskDone(args *ReduceTaskDoneArgs, reply *ReduceTaskDoneReply) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	workerID := args.WorkerID
+	if currentReduceTaskID, present := c.currReduceTasks[workerID]; present && currentReduceTaskID == args.ReduceTaskID {
+		delete(c.currReduceTasks, workerID)
+		log.Printf("#%v:\tReceived successful reduce task: %v.\n", workerID, args.ReduceTaskID)
+	} else {
+		log.Printf("#%v:\tReceived timeout reduce task: %v.\n", workerID, args.ReduceTaskID)
 	}
 
 	return nil
@@ -122,11 +164,18 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.mutex.Lock()
-	c.inputFiles = files
 	c.nReduce = int64(nReduce)
+	c.nMap = int64(len(files))
+
+	c.inputFiles = files
 	c.currMapTasks = make(map[int64]int64)
 	for i := 0; i < len(files); i++ {
 		c.planMapTasks = append(c.planMapTasks, int64(i))
+	}
+
+	c.currReduceTasks = make(map[int64]int64)
+	for i := 0; i < nReduce; i++ {
+		c.planReduceTasks = append(c.planReduceTasks, int64(i))
 	}
 
 	// Your code here.

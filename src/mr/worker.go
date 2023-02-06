@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"time"
 )
 import "log"
@@ -29,6 +30,14 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+// from mrsequential.go, for sort
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 //
 // main/mrworker.go calls this function.
 //
@@ -39,16 +48,19 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
-	workerID, nReduce := WorkerGoOnline()
+	workerID, nMap, nReduce := WorkerGoOnline()
+g:
 	for true {
 		task := RequestTask(workerID)
 		switch task.Action {
 		case "exit":
-			break
-		case "wait":
+			break g
+		case "wait_map", "wait_reduce":
 			time.Sleep(time.Second)
 		case "map":
 			DoMapTask(workerID, nReduce, task, mapf)
+		case "reduce":
+			DoReduceTask(workerID, nMap, task, reducef)
 		}
 	}
 
@@ -103,12 +115,72 @@ func DoMapTask(workerID int64, nReduce int64, task RequestTaskReply, mapf func(s
 		}
 		err = os.Rename(w.Name(), intermediateFileName)
 		if err != nil {
-			log.Fatalf("#%v:\tCannot rename: %v\n", workerID, intermediateFileName)
+			log.Fatalf("#%v:\tCannot rename %v to %v, err: %v.\n", workerID, w.Name(), intermediateFileName, err)
 			return
 		}
 	}
 	ok := call("Coordinator.MapTaskDone", &MapTaskDoneArgs{workerID, task.MapTaskID}, &MapTaskDoneReply{})
-	log.Printf("#%v:\tMap task done %v, ok=%v.\n", workerID, task.MapTaskID, ok)
+	log.Printf("#%v:\tMap task done %v, tell coordinator=%v.\n", workerID, task.MapTaskID, ok)
+}
+
+func DoReduceTask(workerID int64, nMap int64, task RequestTaskReply, reducef func(string, []string) string) {
+	var intermediate []KeyValue
+	for i := int64(0); i < nMap; i++ {
+		intermediateFileName := fmt.Sprintf("mr-%v-%v", i, task.ReduceTaskID)
+		file, err := os.Open(intermediateFileName)
+		if err != nil {
+			log.Fatalf("#%v:\tCannot open: %v, err: %v.\n", workerID, intermediateFileName, err)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+	}
+
+	// from mrsequential.go, but with atomically rename.
+	sort.Sort(ByKey(intermediate))
+
+	oname := fmt.Sprintf("mr-out-%v", task.ReduceTaskID)
+	ofile, err := ioutil.TempFile("", oname)
+	if err != nil {
+		log.Fatalf("#%v:\tCannot open temporary file for: %v, err: %v.\n", workerID, oname, err)
+	}
+
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		var values []string
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		_, err = fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		if err != nil {
+			log.Fatalf("#%v:\tCannot write file: %v, err: %v.\n", workerID, ofile.Name(), err)
+		}
+		i = j
+	}
+
+	err = ofile.Close()
+	if err != nil {
+		log.Fatalf("#%v:\tCannot close: %v, err: %v.\n", workerID, ofile.Name(), err)
+	}
+	err = os.Rename(ofile.Name(), oname)
+	if err != nil {
+		log.Fatalf("#%v:\tCannot rename: %v to %v, err: %v.\n", workerID, ofile.Name(), oname, err)
+	}
+
+	ok := call("Coordinator.ReduceTaskDone", &ReduceTaskDoneArgs{workerID, task.ReduceTaskID}, &ReduceTaskDoneReply{})
+	log.Printf("#%v:\tReduce task done %v, tell coordinator=%v.\n", workerID, task.ReduceTaskID, ok)
 }
 
 func RequestTask(workerID int64) RequestTaskReply {
@@ -117,14 +189,14 @@ func RequestTask(workerID int64) RequestTaskReply {
 	reply := RequestTaskReply{}
 	ok := call("Coordinator.RequestTask", &args, &reply)
 	if ok {
-		log.Printf("#%v:\t Request task success, %v", workerID, reply.Action)
+		log.Printf("#%v:\tRequest task success, %v", workerID, reply.Action)
 	} else {
 		panic(fmt.Sprintf("Worker go online fails, err=%v", ok))
 	}
 	return reply
 }
 
-func WorkerGoOnline() (int64, int64) {
+func WorkerGoOnline() (int64, int64, int64) {
 	args := WorkerGoOnlineArgs{}
 	reply := WorkerGoOnlineReply{}
 	ok := call("Coordinator.WorkerGoOnline", &args, &reply)
@@ -133,7 +205,7 @@ func WorkerGoOnline() (int64, int64) {
 	} else {
 		log.Panicf("Worker go online fails, err=%v\n", ok)
 	}
-	return reply.WorkerID, reply.ReduceN
+	return reply.WorkerID, reply.MapN, reply.ReduceN
 }
 
 //

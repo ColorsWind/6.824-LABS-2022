@@ -27,6 +27,7 @@ type WorkerGoOnlineArgs struct {
 
 type WorkerGoOnlineReply struct {
 	WorkerID int64
+	MapN     int64
 	ReduceN  int64
 }
 
@@ -42,8 +43,7 @@ type RequestTaskReply struct {
 	MapTaskFile string
 
 	// reduce only
-	ReduceTaskID      int64
-	AssociatedMapTask []int64
+	ReduceTaskID int64
 }
 
 type MapTaskDoneArgs struct {
@@ -52,6 +52,14 @@ type MapTaskDoneArgs struct {
 }
 
 type MapTaskDoneReply struct {
+}
+
+type ReduceTaskDoneArgs struct {
+	WorkerID     int64
+	ReduceTaskID int64
+}
+
+type ReduceTaskDoneReply struct {
 }
 
 // Add your RPC definitions here.
