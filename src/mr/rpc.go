@@ -35,10 +35,13 @@ type RequestTaskArgs struct {
 }
 
 type RequestTaskReply struct {
-	Action      string
+	Action string
+
+	// map only
 	MapTaskID   int64
 	MapTaskFile string
 
+	// reduce only
 	ReduceTaskID      int64
 	AssociatedMapTask []int64
 }

@@ -2,7 +2,9 @@ package mr
 
 import (
 	"log"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 import "net"
 import "os"
@@ -10,19 +12,68 @@ import "net/rpc"
 import "net/http"
 
 type Coordinator struct {
-	WorkerCount int64
+	workerCount int64
+	mutex       sync.Mutex
+
+	inputFiles   []string
+	planMapTasks []int64
+	currMapTasks map[int64]int64
+	nReduce      int64
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
 func (c *Coordinator) WorkerGoOnline(args *WorkerGoOnlineArgs, reply *WorkerGoOnlineReply) error {
-	WorkerID := atomic.AddInt64(&c.WorkerCount, 1) - 1
-	reply.WorkerID = WorkerID
+	workerID := atomic.AddInt64(&c.workerCount, 1) - 1
+	reply.WorkerID = workerID
+	reply.ReduceN = c.nReduce
+	log.Printf("#%v:\tAssigned worker id.\n", workerID)
 	return nil
 }
 
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	reply.Action = "wait"
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	workerID := args.WorkerID
+	if len(c.planMapTasks) > 0 {
+		// send map task
+		mapTaskID := c.planMapTasks[0]
+		c.planMapTasks = c.planMapTasks[1:]
+
+		reply.Action = "map"
+		reply.MapTaskID = mapTaskID
+		reply.MapTaskFile = c.inputFiles[mapTaskID]
+		c.currMapTasks[workerID] = mapTaskID
+		log.Printf("#%v:\tAssigned map task: %v.\n", workerID, mapTaskID)
+		go func() {
+			time.Sleep(10 * time.Second)
+			c.mutex.Lock()
+			defer c.mutex.Unlock()
+			if c.currMapTasks[workerID] == reply.MapTaskID {
+				// timeout
+				c.planMapTasks = append(c.planMapTasks, mapTaskID)
+				delete(c.currMapTasks, workerID)
+				log.Printf("#%v:\tMap task timeout: %v.\n", workerID, mapTaskID)
+			}
+		}()
+	} else {
+		reply.Action = "wait"
+	}
+
+	return nil
+}
+
+func (c *Coordinator) MapTaskDone(args *MapTaskDoneArgs, reply *MapTaskDoneReply) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	workerID := args.WorkerID
+	if currentMapTaskID := c.currMapTasks[workerID]; currentMapTaskID == args.MapTaskID {
+		delete(c.currMapTasks, workerID)
+		log.Printf("#%v:\tReceived successful map task: %v.\n", workerID, args.MapTaskID)
+	} else {
+		log.Printf("#%v:\tReceived timeout map task: %v.\n", workerID, args.MapTaskID)
+	}
+
 	return nil
 }
 
@@ -71,9 +122,16 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
+	c.mutex.Lock()
+	c.inputFiles = files
+	c.nReduce = int64(nReduce)
+	c.currMapTasks = make(map[int64]int64)
+	for i := 0; i < len(files); i++ {
+		c.planMapTasks = append(c.planMapTasks, int64(i))
+	}
 
 	// Your code here.
-
+	c.mutex.Unlock()
 	c.server()
 	return &c
 }

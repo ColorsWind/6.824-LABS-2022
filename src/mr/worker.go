@@ -57,26 +57,26 @@ func Worker(mapf func(string, string) []KeyValue,
 func DoMapTask(workerID int64, nReduce int64, task RequestTaskReply, mapf func(string, string) []KeyValue) {
 	file, err := os.Open(task.MapTaskFile)
 	if err != nil {
-		log.Fatalf("#%v:\tcannot open %v\n", workerID, task.MapTaskFile)
+		log.Fatalf("#%v:\tCannot open %v\n", workerID, task.MapTaskFile)
 		return
 	}
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalf("#%v:\tcannot read %v\n", workerID, task.MapTaskFile)
+		log.Fatalf("#%v:\tCannot read %v\n", workerID, task.MapTaskFile)
 		return
 	}
 	err = file.Close()
 	if err != nil {
-		log.Fatalf("#%v:\tcannot close %v\n", workerID, task.MapTaskFile)
+		log.Fatalf("#%v:\tCannot close %v\n", workerID, task.MapTaskFile)
 		return
 	}
 	var writers []*os.File
 	var encoders []*json.Encoder
 	for i := int64(0); i < nReduce; i++ {
 		intermediateFileName := fmt.Sprintf("mr-%v-%v", task.MapTaskID, i)
-		file, err := os.Open(intermediateFileName)
+		file, err := os.OpenFile(intermediateFileName, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0644)
 		if err != nil {
-			log.Fatalf("#%v:\tcannot open %v\n", workerID, intermediateFileName)
+			log.Fatalf("#%v:\tCannot open %v\n", workerID, intermediateFileName)
 			return
 		}
 		enc := json.NewEncoder(file)
@@ -86,22 +86,23 @@ func DoMapTask(workerID int64, nReduce int64, task RequestTaskReply, mapf func(s
 
 	kva := mapf(task.MapTaskFile, string(content))
 	for _, kv := range kva {
-		i := ihash(kv.Key)
+		//log.Fatalf("\nv=================================%v\n\n", nReduce)
+		i := ihash(kv.Key) % int(nReduce)
 		err := encoders[i].Encode(&kv)
 		if err != nil {
-			log.Fatalf("#%v:\tcannot encode %v\n", workerID, kva)
+			log.Fatalf("#%v:\tCannot encode %v\n", workerID, kva)
 			return
 		}
 	}
 	for _, w := range writers {
 		err := w.Close()
 		if err != nil {
-			log.Fatalf("#%v:\tcannot close %v\n", workerID, w)
+			log.Fatalf("#%v:\tCannot close %v\n", workerID, w)
 			return
 		}
 	}
 	ok := call("Coordinator.MapTaskDone", &MapTaskDoneArgs{workerID, task.MapTaskID}, &MapTaskDoneReply{})
-	log.Printf("#%v:\tMap task done %v, err=%v.\n", workerID, task.MapTaskID, ok)
+	log.Printf("#%v:\tMap task done %v, ok=%v.\n", workerID, task.MapTaskID, ok)
 }
 
 func RequestTask(workerID int64) RequestTaskReply {
