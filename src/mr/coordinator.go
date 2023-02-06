@@ -49,7 +49,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			time.Sleep(10 * time.Second)
 			c.mutex.Lock()
 			defer c.mutex.Unlock()
-			if c.currMapTasks[workerID] == reply.MapTaskID {
+			if element, present := c.currMapTasks[workerID]; present && element == mapTaskID {
 				// timeout
 				c.planMapTasks = append(c.planMapTasks, mapTaskID)
 				delete(c.currMapTasks, workerID)
@@ -67,7 +67,7 @@ func (c *Coordinator) MapTaskDone(args *MapTaskDoneArgs, reply *MapTaskDoneReply
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	workerID := args.WorkerID
-	if currentMapTaskID := c.currMapTasks[workerID]; currentMapTaskID == args.MapTaskID {
+	if currentMapTaskID, present := c.currMapTasks[workerID]; present && currentMapTaskID == args.MapTaskID {
 		delete(c.currMapTasks, workerID)
 		log.Printf("#%v:\tReceived successful map task: %v.\n", workerID, args.MapTaskID)
 	} else {
