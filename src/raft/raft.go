@@ -63,6 +63,21 @@ const (
 	State_LEADER    = "LEADER"
 )
 
+func minInt(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
+}
+
+func maxnt(x, y int) int {
+	if x > y {
+		return x
+	}
+	return y
+
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -79,6 +94,8 @@ type Raft struct {
 
 	electionTimer bool
 	state         State
+
+	applyCh chan ApplyMsg
 
 	/*
 		Persistent state on all servers:
@@ -105,7 +122,8 @@ type Raft struct {
 
 // struct for log entry
 type Log struct {
-	Team int
+	Team    int
+	Command interface{}
 }
 
 // return currentTerm and whether this server
@@ -253,19 +271,76 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	rf.electionTimer = true
+	reply.Term = rf.currentTerm
+	reply.Success = false
 
+	// 1. Reply false if term < currentTerm (§5.1)
 	if args.Term > rf.currentTerm {
 		log.Printf("%v <- %v: receiver found higher term(%v > %v) when handling AppendEntries, changed %v to FOLLOWER.\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, rf.state)
 		rf.state = State_FOLLOWER
 		rf.currentTerm = args.Term
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if args.Entries != nil {
+		// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+		if args.PrevLogIndex < 0 || args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Team != args.PrevLogTerm {
+			//log.Printf("%v <- %v: receiver's log doesn’t contain matcheing log when handling AppendEntries. args=%#v, rf=%v.\n", rf.me, args.LeaderId, args, rf.s())
+			return
+		}
+		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and
+		//    all that follow it (§5.3)
+		// Since already check rf.log[args.PrevLogIndex].Team == args.PrevLogTerm, here args.PrevLogIndex < len(rf.log)
+		// raft log: -----xxxx++++
+		// args log:       xxx****
+		// consistencyCount is the number of 'x' in args log
+		//log.Printf("%v <- %v: accept.\n args=%#v\n rf=%v.\n", rf.me, args.LeaderId, args, rf.s())
+		var consistencyCount = len(args.Entries)
+		for i, logEntry := range args.Entries {
+			j := args.PrevLogIndex + 1 + i
+			if j >= len(rf.log) {
+				consistencyCount = i
+				//log.Panicf("a")
+				break
+			}
+			if rf.log[j].Team != logEntry.Team {
+				consistencyCount = i
+				//log.Panicf("b")
+				break
+			}
+		}
+		if deleteCount := len(rf.log) - (args.PrevLogIndex + consistencyCount + 1); deleteCount > 0 {
+			log.Printf("%v <- %v: delete %v inconsistent log.", rf.me, args.LeaderId, deleteCount)
+		}
+		rf.log = rf.log[:args.PrevLogIndex+consistencyCount+1]
+
+		// 4. Append any new entries not already in the log
+		rf.log = append(rf.log, args.Entries[consistencyCount:]...)
+		//fmt.Printf("\n%#v\n", rf.log)
+
+		reply.Success = true
+	}
+
+	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		commitIndex := minInt(args.LeaderCommit, len(rf.log)-1)
+		for index := rf.commitIndex + 1; index <= commitIndex; index++ {
+			rf.applyCh <- ApplyMsg{
+				CommandValid:  true,
+				Command:       rf.log[index].Command,
+				CommandIndex:  index,
+				SnapshotValid: false,
+				Snapshot:      nil,
+				SnapshotTerm:  -1,
+				SnapshotIndex: -1,
+			}
+		}
+		rf.commitIndex = commitIndex
 
 	}
-	//reply.Term = rf.currentTerm
-	//if args.Term < rf.currentTerm {
-	//	reply.Success = false
-	//} else if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-	//	reply.Success = false
-	//}
+
+	log.Printf("%v <- %v: accept AppendEntries.\n", rf.me, args.LeaderId)
 }
 
 //
@@ -327,6 +402,85 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != State_LEADER {
+		isLeader = false
+		return index, term, isLeader
+	}
+
+	index = len(rf.log)
+	term = rf.currentTerm
+	isLeader = true
+
+	prevLogIndex := len(rf.log) - 1
+	prevLogTerm := rf.log[prevLogIndex].Team
+	args := AppendEntriesArgs{rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, []Log{{term, command}}, rf.commitIndex}
+
+	ch := make(chan struct {
+		server int
+		*AppendEntriesReply
+	})
+	for server := range rf.peers {
+		args := args
+		server := server
+		go func() {
+			for {
+				reply := AppendEntriesReply{}
+				ok := rf.sendAppendEntries(server, &args, &reply)
+				if ok && reply.Success {
+					ch <- struct {
+						server int
+						*AppendEntriesReply
+					}{server, &reply}
+					break
+				}
+			}
+		}()
+	}
+	serverCount := len(rf.peers)
+	go func() {
+		var successCount = 0
+		for k := 0; k < len(rf.peers); k++ {
+			reply := <-ch
+			if reply.Success {
+				successCount++
+			}
+			if successCount >= serverCount/2+1 {
+				break
+			}
+		}
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		if successCount >= serverCount/2+1 {
+			rf.applyCh <- ApplyMsg{
+				CommandValid:  true,
+				Command:       command,
+				CommandIndex:  index,
+				SnapshotValid: false,
+				Snapshot:      nil,
+				SnapshotTerm:  -1,
+				SnapshotIndex: -1,
+			}
+			rf.commitIndex = index
+			command := fmt.Sprintf("%v", command)
+			log.Printf("%v: start command success %v (%v/%v)!\n", rf.me, command[:minInt(len(command), 5)], successCount, serverCount)
+		} else {
+			rf.applyCh <- ApplyMsg{
+				CommandValid:  false,
+				Command:       command,
+				CommandIndex:  index,
+				SnapshotValid: false,
+				Snapshot:      nil,
+				SnapshotTerm:  -1,
+				SnapshotIndex: -1,
+			}
+			command := fmt.Sprintf("%v", command)
+			log.Printf("%v: start command fail %v (%v/%v)!\n", rf.me, command[:minInt(len(command), 5)], successCount, serverCount)
+		}
+
+	}()
 
 	return index, term, isLeader
 }
@@ -398,6 +552,7 @@ func (rf *Raft) kickOffElection() {
 			continue
 		}
 		server := server
+		args := args
 		go func() {
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(server, &args, &reply)
@@ -451,7 +606,14 @@ func (rf *Raft) kickOffElection() {
 // call this function WITH lock.
 func (rf *Raft) sendLeaderHeartbeat() {
 	log.Printf("%v: send leader heartbeat, state=%v, currentTerm=%v.\n", rf.me, rf.state, rf.currentTerm)
-	args := AppendEntriesArgs{rf.currentTerm, rf.me, -1, -1, nil, -1}
+	args := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: len(rf.log) - 1,
+		PrevLogTerm:  rf.log[len(rf.log)-1].Team,
+		Entries:      nil,
+		LeaderCommit: rf.commitIndex,
+	}
 	// not possible to happen args.Term > rf.currentTerm
 	ch := make(chan struct {
 		server int
@@ -462,6 +624,7 @@ func (rf *Raft) sendLeaderHeartbeat() {
 		if server == rf.me {
 			continue
 		}
+		args := args
 		server := server
 		go func() {
 			reply := AppendEntriesReply{}
@@ -514,11 +677,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applyCh = applyCh
 	rf.state = State_FOLLOWER
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.votedFor = -1
-	rf.log = append(rf.log, Log{0})
+	rf.log = append(rf.log, Log{0, nil})
 	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
 
 	// initialize from state persisted before a crash
