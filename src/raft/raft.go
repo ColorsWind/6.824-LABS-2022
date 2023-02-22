@@ -366,17 +366,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) updateLastApply() {
 	if rf.commitIndex > rf.lastApplied {
 		for index := rf.lastApplied + 1; index <= rf.commitIndex; index++ {
+			command := rf.log[index].Command
 			rf.applyCh <- ApplyMsg{
 				CommandValid:  true,
-				Command:       rf.log[index].Command,
+				Command:       command,
 				CommandIndex:  index,
 				SnapshotValid: false,
 				Snapshot:      nil,
 				SnapshotTerm:  -1,
 				SnapshotIndex: -1,
 			}
-			command := fmt.Sprintf("%v", rf.log[index].Command)
-			log.Printf("%v: apply command to state machine: %v!\n", rf.me, command[:minInt(len(command), 5)])
+
+			log.Printf("%v: apply command to state machine: %v: %v!\n", rf.me, index, CommandToString(command))
 		}
 		rf.lastApplied = rf.commitIndex
 	}
@@ -437,17 +438,16 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	panic("a")
+
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	log.Printf("%v: Receive Start: %v, state=%v.\n", rf.me, CommandToString(command), rf.state)
+	log.Printf("%v: Receive Start: %v, rf=%v.\n", rf.me, CommandToString(command), rf)
 	if rf.state != State_LEADER {
-		isLeader = false
 		return index, term, isLeader
 	}
 
@@ -455,16 +455,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = rf.currentTerm
 	isLeader = true
 
-	prevLogIndex := len(rf.log) - 1
-	prevLogTerm := rf.log[prevLogIndex].Team
-
-	ch := make(chan struct {
-		server int
-		*AppendEntriesReply
-	})
-
 	// append to leader's log
 	rf.log = append(rf.log, Log{term, command})
+
+	totalServer := len(rf.peers)
 
 	for server := range rf.peers {
 		if server == rf.me {
@@ -474,36 +468,66 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
 		if len(rf.log)-1 >= rf.nextIndex[server] {
 			go func() {
+				var reply AppendEntriesReply
 				for {
 					rf.mu.Lock()
+					prevLogIndex := rf.nextIndex[server] - 1
+					prevLogTerm := rf.log[prevLogIndex].Team
+
 					args := AppendEntriesArgs{rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, rf.log[rf.nextIndex[server]:], rf.commitIndex}
-					var reply AppendEntriesReply
-					var ok = false
+					reply = AppendEntriesReply{}
 					rf.mu.Unlock()
+					ok := false
 					for !ok {
-						reply = AppendEntriesReply{}
 						ok = rf.sendAppendEntries(server, &args, &reply)
 					}
-					rf.mu.Lock()
-					if rf.currentTerm != term {
-						// if another term, nextIndex & matchIndex have been reset
-						break
-					}
-					if reply.Success {
-						rf.nextIndex[server] = index + 1
-						rf.matchIndex[server] = index
-						ch <- struct {
-							server int
-							*AppendEntriesReply
-						}{server, &reply}
-					} else {
+					if !reply.Success {
+						rf.mu.Lock()
 						rf.nextIndex[server]--
 						log.Printf("%v -> %v: AppendEntries, decrease nextIndex to %v.\n", rf.me, server, rf.nextIndex[server])
-					}
-					rf.mu.Unlock()
+						rf.mu.Unlock()
+					} else {
 
-					if reply.Success {
 						break
+					}
+				}
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
+				// If successful: update nextIndex and matchIndex for follower (§5.3)
+				if rf.nextIndex[server] < index+1 {
+					rf.nextIndex[server] = index + 1
+				}
+				if rf.matchIndex[server] < index {
+					rf.matchIndex[server] = index
+				}
+
+				// If there exists an N such that N > commitIndex, a majority
+				// of matchIndex[N] ≥ N, and log[N].term == currentTerm:
+				// set commitIndex = N
+				log.Printf("%v -> %v: AppendEntries success: %v.\n", rf.me, server, rf.nextIndex[server])
+				if rf.matchIndex[server] < index {
+					rf.matchIndex[server] = index
+				}
+				for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
+					if rf.log[N].Team != rf.currentTerm {
+						break
+					}
+					var satisfyCount = 1
+					for i := range rf.peers {
+						if i == rf.me {
+							continue
+						}
+						if rf.matchIndex[i] < N {
+							continue
+						}
+						satisfyCount++
+						if satisfyCount >= totalServer/2+1 {
+							rf.commitIndex = N
+							//log.Printf("%v: start command success %v (%v/%v)!\n", rf.me, Log{term, command}, successCount, totalServer)
+							rf.updateLastApply()
+							break
+						}
 					}
 				}
 			}()
@@ -511,43 +535,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			log.Panicln()
 		}
 	}
-	serverCount := len(rf.peers)
-	go func() {
-		var successCount = 1
-		for k := 0; k < serverCount-1; k++ {
-			reply := <-ch
-			if reply.Success {
-				successCount++
-			} else {
-				log.Panicf("%v -> %v: Receive fail AppendEntriesArgs.", rf.me, reply.server)
-			}
-			if successCount >= serverCount/2+1 {
-				break
-			}
-		}
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
 
-		if successCount >= serverCount/2+1 {
-			rf.commitIndex = index
-			rf.applyCh <- ApplyMsg{
-				CommandValid:  true,
-				Command:       command,
-				CommandIndex:  index,
-				SnapshotValid: false,
-				Snapshot:      nil,
-				SnapshotTerm:  -1,
-				SnapshotIndex: -1,
-			}
-			rf.lastApplied = index
-			command := fmt.Sprintf("%v", command)
-			log.Printf("%v: start command success %v (%v/%v)!\n", rf.me, command[:minInt(len(command), 5)], successCount, serverCount)
-		} else {
-			command := fmt.Sprintf("%v", command)
-			log.Panicf("%v: start command fail %v (%v/%v)!\n", rf.me, command[:minInt(len(command), 5)], successCount, serverCount)
-		}
-
-	}()
 	return index, term, isLeader
 }
 
@@ -623,7 +611,7 @@ func (rf *Raft) kickOffElection() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			if !ok {
-				log.Printf("%v -> %v: receive invalid RequestVodeReply, state=%v, currentTerm=%v: %v, receiveVoteCount=%v | %v", rf.me, server, rf.state, rf.currentTerm, args, receiveVoteCount, reply)
+				log.Printf("%v -> %v: receive invalid RequestVodeReply, state=%v, currentTerm=%v.\n", rf.me, server, rf.state, rf.currentTerm)
 				return
 			}
 			if rf.state != State_CANDIDATE {
@@ -637,6 +625,7 @@ func (rf *Raft) kickOffElection() {
 			if receiveVoteCount == totalSever/2+1 {
 				rf.becomeLeader(receiveVoteCount, totalSever)
 			}
+			log.Printf("%v -> %v: get voted(%v/%v).\n", rf.me, server, receiveVoteCount, totalSever)
 		}()
 	}
 }
