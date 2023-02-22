@@ -290,21 +290,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//log.Printf("%v <- %v: receive AppendEntries, args=%v\n", rf.me, args.LeaderId, args)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	log.Printf("%v <- %v: receive AppendEntries, args=%v, rf=%v.\n", rf.me, args.LeaderId, args, rf)
 
 	rf.electionTimer = true
 
-	// 1. Reply false if term < currentTerm (§5.1)
 	if args.Term > rf.currentTerm {
 		log.Printf("%v <- %v: receiver found higher term(%v > %v) when handling AppendEntries, changed %v to FOLLOWER.\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, rf.state)
 		rf.state = State_FOLLOWER
 		rf.currentTerm = args.Term
+
+	}
+
+	// 1. Reply false if term < currentTerm (§5.1)
+	if args.Term < rf.currentTerm {
+		log.Printf("%v <- %v: receive outdated AppendEntries, term=%v, currentTerm=%v.\n", rf.me, args.LeaderId, args.Term, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
 	// decoder will convert nil to []
-	if args.Entries != nil || len(args.Entries) > 0 {
+	if args.Entries != nil && len(args.Entries) > 0 {
 		// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 		if args.PrevLogIndex < 0 || args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Team != args.PrevLogTerm {
 			log.Printf("%v <- %v: receiver's log doesn’t contain matcheing log when handling AppendEntries. args=%#v, rf=%v.\n", rf.me, args.LeaderId, args, rf)
@@ -336,7 +342,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if deleteCount := len(rf.log) - (args.PrevLogIndex + consistencyCount + 1); deleteCount > 0 {
 			log.Printf("%v <- %v: delete %v inconsistent log.", rf.me, args.LeaderId, deleteCount)
 		}
-		rf.log = rf.log[:args.PrevLogIndex+consistencyCount+1]
+		rf.log = rf.log[:args.PrevLogIndex+1+consistencyCount]
 
 		// 4. Append any new entries not already in the log
 		rf.log = append(rf.log, args.Entries[consistencyCount:]...)
@@ -477,19 +483,32 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					args := AppendEntriesArgs{rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, rf.log[rf.nextIndex[server]:], rf.commitIndex}
 					reply = AppendEntriesReply{}
 					rf.mu.Unlock()
-					ok := false
-					for !ok {
-						ok = rf.sendAppendEntries(server, &args, &reply)
+					for {
+						ok := rf.sendAppendEntries(server, &args, &reply)
+						log.Printf("%v -> %v: send AppendEntries, args=%v.\n", rf.me, server, args)
+						if ok {
+							break
+						} else {
+							time.Sleep(10 * time.Millisecond)
+						}
+					}
+					rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.state = State_FOLLOWER
+						rf.mu.Unlock()
+						log.Printf("%v -> %v: found higher term (%v > %v), change state to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm)
+						return
 					}
 					if !reply.Success {
-						rf.mu.Lock()
 						rf.nextIndex[server]--
-						log.Printf("%v -> %v: AppendEntries, decrease nextIndex to %v.\n", rf.me, server, rf.nextIndex[server])
+						log.Printf("%v -> %v: AppendEntries fail, decrease nextIndex to %v.\n", rf.me, server, rf.nextIndex[server])
 						rf.mu.Unlock()
 					} else {
-
+						rf.mu.Unlock()
 						break
 					}
+
 				}
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
@@ -575,8 +594,6 @@ func (rf *Raft) ticker() {
 
 		rf.mu.Lock()
 
-		log.Printf("%v: tick, state=%v, electionTimer=%v, currentTerm=%v.\n", rf.me, rf.state, rf.electionTimer, rf.currentTerm)
-
 		if rf.electionTimer {
 			rf.electionTimer = false
 		} else if rf.state != State_LEADER {
@@ -590,6 +607,11 @@ func (rf *Raft) ticker() {
 func (rf *Raft) kickOffElection() {
 	log.Printf("%v: kick off election, electionTimer=%v, currentTerm=%v.\n", rf.me, rf.electionTimer, rf.currentTerm)
 
+	// On conversion to candidate, start election:
+	//  Increment currentTerm
+	//  Vote for self
+	//  Reset election timer
+	//  Send RequestVote RPCs to all other servers
 	term := rf.currentTerm + 1
 	rf.currentTerm = term
 	rf.votedFor = rf.me
@@ -597,6 +619,7 @@ func (rf *Raft) kickOffElection() {
 	rf.state = State_CANDIDATE
 
 	totalSever := len(rf.peers)
+	//lastLogIndex := len(rf.log) - 1
 	args := RequestVoteArgs{rf.currentTerm, rf.me, rf.commitIndex, rf.log[rf.commitIndex].Team}
 	var receiveVoteCount = 1
 	for server := 0; server < totalSever; server++ {
@@ -614,15 +637,24 @@ func (rf *Raft) kickOffElection() {
 				log.Printf("%v -> %v: receive invalid RequestVodeReply, state=%v, currentTerm=%v.\n", rf.me, server, rf.state, rf.currentTerm)
 				return
 			}
+			if reply.Term > rf.currentTerm {
+				// If AppendEntries RPC received from new leader: convert to follower
+				log.Printf("%v -> %v: found higher term(%v > %v) when pressing RequestVodeReply. changed %v to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm, rf.state)
+				rf.state = State_FOLLOWER
+				rf.currentTerm = args.Term
+				return
+			}
 			if rf.state != State_CANDIDATE {
 				return
 			}
-			if reply.Term != rf.currentTerm {
-				log.Printf("%v -> %v: receive outdated RequestVodeReply, currentTerm=%v, but term when send is %v.\n", rf.me, server, rf.currentTerm, term)
+			if term != rf.currentTerm {
+				// even it still candidate, a new term begins.
+				log.Printf("%v -> %v: receive outdated RequestVodeReply, currentTerm=%v, but rf's term when sending is %v.\n", rf.me, server, rf.currentTerm, term)
 				return
 			}
 			receiveVoteCount += 1
 			if receiveVoteCount == totalSever/2+1 {
+				//  If votes received from majority of servers: become leader
 				rf.becomeLeader(receiveVoteCount, totalSever)
 			}
 			log.Printf("%v -> %v: get voted(%v/%v).\n", rf.me, server, receiveVoteCount, totalSever)
@@ -715,6 +747,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go func() {
 		for rf.killed() == false {
 			rf.mu.Lock()
+			log.Printf("%v: tick plus, rf=%v.\n", rf.me, rf)
 			if rf.state == State_LEADER {
 				rf.sendLeaderHeartbeat()
 			}
