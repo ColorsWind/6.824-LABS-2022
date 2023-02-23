@@ -486,9 +486,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		go func() {
 			for {
 				rf.mu.Lock()
-				retry, immediate, success := rf.checkSendAppendEntries(server, term, lastLogIndex)
+				retry, immediate, success := rf.checkSendAppendEntriesWithLock(server, term, lastLogIndex)
 				if success {
-					rf.checkCommit()
+					rf.checkCommitWithLock()
 				}
 				rf.mu.Unlock()
 				if !retry {
@@ -506,7 +506,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 // call this function WITH lock
 // return if should call again without delay
-func (rf *Raft) checkSendAppendEntries(server int, expectTerm int, expectLastLogIndex int) (retry bool, immediate bool, success bool) {
+func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expectLastLogIndex int) (retry bool, immediate bool, success bool) {
 	retry = false
 	immediate = false
 	success = false
@@ -568,7 +568,7 @@ func (rf *Raft) checkSendAppendEntries(server int, expectTerm int, expectLastLog
 }
 
 // call this function WITH lock
-func (rf *Raft) checkCommit() {
+func (rf *Raft) checkCommitWithLock() {
 	if rf.state != State_LEADER {
 		return
 	}
@@ -638,14 +638,14 @@ func (rf *Raft) ticker() {
 		if rf.electionTimer {
 			rf.electionTimer = false
 		} else if rf.state != State_LEADER {
-			rf.kickOffElection()
+			rf.kickOffElectionWithLock()
 		}
 		rf.mu.Unlock()
 	}
 }
 
 // call this function WITH lock.
-func (rf *Raft) kickOffElection() {
+func (rf *Raft) kickOffElectionWithLock() {
 	log.Printf("%v: kick off election,rf=%v.\n", rf.me, rf)
 
 	// On conversion to candidate, start election:
@@ -686,21 +686,23 @@ func (rf *Raft) kickOffElection() {
 				return
 			}
 			if rf.state != State_CANDIDATE {
+				log.Printf("%v -> %v: send RequestVode, receive outdated reply, not leader now, rf=%v.\n", rf.me, server, rf)
 				return
 			}
 			if term != rf.currentTerm {
-				// even it still candidate, a new term begins.
-				log.Printf("%v -> %v: receive outdated RequestVodeReply, currentTerm=%v, but rf's term when sending is %v.\n", rf.me, server, rf.currentTerm, term)
+				// even it still candidate, a new term is found (implicit a new election begin).
+				log.Printf("%v -> %v: send RequestVode, receive outdated reply, currentTerm=%v, but rf's term when sending is %v.\n", rf.me, server, rf.currentTerm, term)
 				return
 			}
 			if !reply.VoteGranted {
+				log.Printf("%v -> %v: send RequestVode, not voted.\n", rf.me, server)
 				return
 			}
 			receiveVoteCount += 1
-			log.Printf("%v -> %v: get voted(%v/%v).\n", rf.me, server, receiveVoteCount, totalSever)
+			log.Printf("%v -> %v: send RequestVode, get voted(%v/%v).\n", rf.me, server, receiveVoteCount, totalSever)
 			if receiveVoteCount == totalSever/2+1 {
 				//  If votes received from majority of servers: become leader
-				rf.becomeLeader(receiveVoteCount, totalSever)
+				rf.becomeLeaderWithLock(receiveVoteCount, totalSever)
 			}
 
 		}()
@@ -708,10 +710,10 @@ func (rf *Raft) kickOffElection() {
 }
 
 // call this function WITH lock
-func (rf *Raft) becomeLeader(receiveVoteCount, totalSever int) {
+func (rf *Raft) becomeLeaderWithLock(receiveVoteCount, totalSever int) {
 	log.Printf("%v: win election: %v/%v.\n", rf.me, receiveVoteCount, totalSever)
 	rf.state = State_LEADER
-	rf.sendLeaderHeartbeat()
+	rf.sendLeaderHeartbeatWithLock()
 	for k := 0; k < totalSever; k++ {
 		rf.nextIndex[k] = len(rf.log)
 		rf.matchIndex[k] = 0
@@ -720,7 +722,7 @@ func (rf *Raft) becomeLeader(receiveVoteCount, totalSever int) {
 }
 
 // call this function WITH lock.
-func (rf *Raft) sendLeaderHeartbeat() {
+func (rf *Raft) sendLeaderHeartbeatWithLock() {
 	log.Printf("%v: send HEARTBEAT, state=%v, currentTerm=%v.\n", rf.me, rf.state, rf.currentTerm)
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -796,7 +798,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.mu.Lock()
 			log.Printf("%v: tick heartbeat, rf=%v.\n", rf.me, rf)
 			if rf.state == State_LEADER {
-				rf.sendLeaderHeartbeat()
+				rf.sendLeaderHeartbeatWithLock()
 			}
 			rf.mu.Unlock()
 			time.Sleep(140 * time.Millisecond)
@@ -811,7 +813,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//	go func() {
 	//		for rf.killed() == false {
 	//			rf.mu.Lock()
-	//			immediate := rf.checkSendAppendEntries(server)
+	//			immediate := rf.checkSendAppendEntriesWithLock(server)
 	//			rf.mu.Unlock()
 	//			if !immediate {
 	//				time.Sleep(10 * time.Millisecond)
@@ -822,7 +824,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//go func() {
 	//	for rf.killed() == false {
 	//		rf.mu.Lock()
-	//		//rf.checkCommit()
+	//		//rf.checkCommitWithLock()
 	//		rf.mu.Unlock()
 	//		time.Sleep(10 * time.Millisecond)
 	//	}
