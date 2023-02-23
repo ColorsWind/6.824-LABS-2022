@@ -479,7 +479,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		go func() {
 			for {
 				rf.mu.Lock()
-				retry, immediate := rf.checkSendAppendEntries(server, term, lastLogIndex)
+				retry, immediate, success := rf.checkSendAppendEntries(server, term, lastLogIndex)
+				if success {
+					rf.checkCommit()
+				}
 				rf.mu.Unlock()
 				if !retry {
 					break
@@ -496,9 +499,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 // call this function WITH lock
 // return if should call again without delay
-func (rf *Raft) checkSendAppendEntries(server int, expectTerm int, expectLastLogIndex int) (retry bool, immediate bool) {
+func (rf *Raft) checkSendAppendEntries(server int, expectTerm int, expectLastLogIndex int) (retry bool, immediate bool, success bool) {
 	retry = false
 	immediate = false
+	success = false
 	if rf.state != State_LEADER || rf.currentTerm != expectTerm {
 		return
 	}
@@ -552,6 +556,7 @@ func (rf *Raft) checkSendAppendEntries(server int, expectTerm int, expectLastLog
 		}
 	}
 	log.Printf("%v -> %v: send AppendEntries, success, nextIndex=%v.\n", rf.me, server, rf.nextIndex[server])
+	success = true
 	return
 }
 
@@ -804,15 +809,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//		}
 	//	}()
 	//}
-	go func() {
-		for rf.killed() == false {
-			rf.mu.Lock()
-			rf.checkCommit()
-			rf.mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
-		}
-
-	}()
+	//go func() {
+	//	for rf.killed() == false {
+	//		rf.mu.Lock()
+	//		//rf.checkCommit()
+	//		rf.mu.Unlock()
+	//		time.Sleep(10 * time.Millisecond)
+	//	}
+	//
+	//}()
 
 	return rf
 }
