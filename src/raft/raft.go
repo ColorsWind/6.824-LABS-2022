@@ -236,10 +236,6 @@ func (l Log) String() string {
 	return fmt.Sprintf("Log{cmd=%v, term=%v}", CommandToString(l.Command), l.Team)
 }
 
-//func (args AppendEntriesArgs) String() string {
-//	return fmt.Sprintf("{Term=%v, LeaderId=%v, Entries=%v, PrevLogTerm=%v, PrevLogIndex=%v, LeaderCommit=%v}", args.Term, args.LeaderId, args.Entries, args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit)
-//}
-
 //
 // RequestVote RPC handler.
 //
@@ -280,6 +276,10 @@ type AppendEntriesArgs struct {
 	PrevLogTerm  int   // term of prevLogIndex entry
 	Entries      []Log // log entries to store (empty for heartbeat; may send more than one for efficiency)
 	LeaderCommit int   // leader’s commitIndex
+}
+
+func (args AppendEntriesArgs) String() string {
+	return fmt.Sprintf("{Term=%v, LeaderId=%v, Entries=%v, PrevLogTerm=%v, PrevLogIndex=%v, LeaderCommit=%v}", args.Term, args.LeaderId, args.Entries, args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit)
 }
 
 type AppendEntriesReply struct {
@@ -362,7 +362,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		commitIndex := minInt(args.LeaderCommit, len(rf.log)-1)
 		rf.commitIndex = commitIndex
 	}
-	rf.updateLastApply()
+	rf.checkApplyStateMachine()
 	if args.Entries != nil || len(args.Entries) != 0 {
 		log.Printf("%v <- %v: accept AppendEntries. args=%v, rf=%v.\n", rf.me, args.LeaderId, args, rf)
 	}
@@ -370,7 +370,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 // call this function with lock
-func (rf *Raft) updateLastApply() {
+func (rf *Raft) checkApplyStateMachine() {
 	if rf.commitIndex > rf.lastApplied {
 		for index := rf.lastApplied + 1; index <= rf.commitIndex; index++ {
 			command := rf.log[index].Command
@@ -453,7 +453,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	log.Printf("%v: Receive Start: %v, rf=%v.\n", rf.me, CommandToString(command), rf)
+	log.Printf("%v: Start: %v, rf=%v.\n", rf.me, CommandToString(command), rf)
 	if rf.state != State_LEADER {
 		return index, term, isLeader
 	}
@@ -465,103 +465,83 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// append to leader's log
 	rf.log = append(rf.log, Log{term, command})
 
-	totalServer := len(rf.peers)
+	return index, term, isLeader
+}
 
-	for server := range rf.peers {
-		if server == rf.me {
-			continue
-		}
-		server := server
-		// If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
-		if len(rf.log)-1 >= rf.nextIndex[server] {
-			go func() {
-				var reply AppendEntriesReply
-				for {
-					rf.mu.Lock()
-					prevLogIndex := rf.nextIndex[server] - 1
-					prevLogTerm := rf.log[prevLogIndex].Team
-					// should send AppendEntries with THAT term to prevent incorrectly receiving outdated messages
-					args := AppendEntriesArgs{term, rf.me, prevLogIndex, prevLogTerm, rf.log[rf.nextIndex[server]:], rf.commitIndex}
-					rf.mu.Unlock()
-					for {
-						reply = AppendEntriesReply{}
-						ok := rf.sendAppendEntries(server, &args, &reply)
-						log.Printf("%v -> %v: send AppendEntries, args=%v.\n", rf.me, server, args)
-						if ok {
-							break
-						} else {
-							time.Sleep(10 * time.Millisecond)
-						}
-					}
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						log.Printf("%v -> %v: found higher term (%v > %v), change state to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm)
-						rf.currentTerm = reply.Term
-						rf.state = State_FOLLOWER
-						rf.mu.Unlock()
-						return
-					}
-
-					if !reply.Success {
-						rf.nextIndex[server]--
-						log.Printf("%v -> %v: AppendEntries fail, decrease nextIndex to %v.\n", rf.me, server, rf.nextIndex[server])
-						rf.mu.Unlock()
-						if reply.Term > term {
-							// no need to retry
-							return
-						}
-					} else {
-						rf.mu.Unlock()
-						break
-					}
-
-				}
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-
-				// If successful: update nextIndex and matchIndex for follower (§5.3)
-				if rf.nextIndex[server] < index+1 {
-					rf.nextIndex[server] = index + 1
-				}
-				if rf.matchIndex[server] < index {
-					rf.matchIndex[server] = index
-				}
-
-				// If there exists an N such that N > commitIndex, a majority
-				// of matchIndex[N] ≥ N, and log[N].term == currentTerm:
-				// set commitIndex = N
-				log.Printf("%v -> %v: AppendEntries success: %v.\n", rf.me, server, rf.nextIndex[server])
-				if rf.matchIndex[server] < index {
-					rf.matchIndex[server] = index
-				}
-				for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
-					if rf.log[N].Team != rf.currentTerm {
-						break
-					}
-					var satisfyCount = 1
-					for i := range rf.peers {
-						if i == rf.me {
-							continue
-						}
-						if rf.matchIndex[i] < N {
-							continue
-						}
-						satisfyCount++
-						if satisfyCount >= totalServer/2+1 {
-							rf.commitIndex = N
-							//log.Printf("%v: start command success %v (%v/%v)!\n", rf.me, Log{term, command}, successCount, totalServer)
-							rf.updateLastApply()
-							break
-						}
-					}
-				}
-			}()
-		} else {
-			log.Panicln()
-		}
+// call this function WITH lock
+// return if should call again without delay
+func (rf *Raft) checkSendAppendEntries(server int) bool {
+	if rf.state != State_LEADER {
+		return false
 	}
 
-	return index, term, isLeader
+	lastLogIndex := len(rf.log) - 1
+	if lastLogIndex < rf.nextIndex[server] {
+		return false
+	}
+
+	term := rf.currentTerm
+	prevLogIndex := rf.nextIndex[server] - 1
+	prevLogTerm := rf.log[prevLogIndex].Team
+	// should send AppendEntries with THAT term to prevent incorrectly receiving outdated messages
+	args := AppendEntriesArgs{term, rf.me, prevLogIndex, prevLogTerm, rf.log[prevLogIndex+1:], rf.commitIndex}
+	reply := AppendEntriesReply{}
+	rf.mu.Unlock()
+	ok := rf.sendAppendEntries(server, &args, &reply)
+	rf.mu.Lock()
+	log.Printf("%v -> %v: send AppendEntries, args=%v, ok=%v.\n", rf.me, server, args, ok)
+
+	if reply.Term > rf.currentTerm {
+		log.Printf("%v -> %v: found higher term (%v > %v), change state to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm)
+		rf.currentTerm = reply.Term
+		rf.state = State_FOLLOWER
+		return false
+	}
+
+	if !reply.Success {
+		rf.nextIndex[server]--
+		log.Printf("%v -> %v: AppendEntries fail, decrease nextIndex to %v.\n", rf.me, server, rf.nextIndex[server])
+		return true
+	}
+
+	// If successful: update nextIndex and matchIndex for follower (§5.3)
+	if rf.nextIndex[server] < lastLogIndex+1 {
+		rf.nextIndex[server] = lastLogIndex + 1
+	}
+	if rf.matchIndex[server] < lastLogIndex {
+		rf.matchIndex[server] = lastLogIndex
+	}
+	log.Printf("%v -> %v: AppendEntries success: %v.\n", rf.me, server, rf.nextIndex[server])
+	return false
+}
+
+// call this function WITH lock
+func (rf *Raft) checkCommit() {
+	// If there exists an N such that N > commitIndex, a majority
+	// of matchIndex[N] ≥ N, and log[N].term == currentTerm:
+	// set commitIndex = N
+	totalServer := len(rf.peers)
+	for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
+		if rf.log[N].Team != rf.currentTerm {
+			break
+		}
+		var satisfyCount = 1
+		for i := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			if rf.matchIndex[i] < N {
+				continue
+			}
+			satisfyCount++
+			if satisfyCount >= totalServer/2+1 {
+				rf.commitIndex = N
+				//log.Printf("%v: start command success %v (%v/%v)!\n", rf.me, Log{term, command}, successCount, totalServer)
+				rf.checkApplyStateMachine()
+				break
+			}
+		}
+	}
 }
 
 //
@@ -662,11 +642,12 @@ func (rf *Raft) kickOffElection() {
 				return
 			}
 			receiveVoteCount += 1
+			log.Printf("%v -> %v: get voted(%v/%v).\n", rf.me, server, receiveVoteCount, totalSever)
 			if receiveVoteCount == totalSever/2+1 {
 				//  If votes received from majority of servers: become leader
 				rf.becomeLeader(receiveVoteCount, totalSever)
 			}
-			log.Printf("%v -> %v: get voted(%v/%v).\n", rf.me, server, receiveVoteCount, totalSever)
+
 		}()
 	}
 }
@@ -763,6 +744,31 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.mu.Unlock()
 			time.Sleep(140 * time.Millisecond)
 		}
+	}()
+	for server := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+		server := server
+		go func() {
+			for rf.killed() == false {
+				rf.mu.Lock()
+				immediate := rf.checkSendAppendEntries(server)
+				rf.mu.Unlock()
+				if !immediate {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+		}()
+	}
+	go func() {
+		for rf.killed() == false {
+			rf.mu.Lock()
+			rf.checkCommit()
+			rf.mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+		}
+
 	}()
 
 	return rf
