@@ -102,6 +102,7 @@ type Raft struct {
 
 	electionTimer bool
 	state         State
+	applyCond     *sync.Cond
 
 	applyCh chan ApplyMsg
 
@@ -366,18 +367,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		commitIndex := minInt(args.LeaderCommit, len(rf.log)-1)
 		rf.commitIndex = commitIndex
 	}
-	rf.checkApplyStateMachine()
+	rf.applyCond.Signal()
 	if args.Entries != nil || len(args.Entries) != 0 {
 		log.Printf("%v <- %v: receive AppendEntries, accept AppendEntries. rf=%v, args=%v.\n", rf.me, args.LeaderId, rf, args)
 	}
 
 }
 
-// call this function with lock
-func (rf *Raft) checkApplyStateMachine() {
-	if rf.commitIndex > rf.lastApplied {
-		for index := rf.lastApplied + 1; index <= rf.commitIndex; index++ {
+// call this function WITHOUT lock
+func (rf *Raft) onApplyStateMachine() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		rf.applyCond.Wait()
+		for rf.commitIndex > rf.lastApplied {
+			index := rf.lastApplied + 1
 			command := rf.log[index].Command
+			rf.mu.Unlock()
 			rf.applyCh <- ApplyMsg{
 				CommandValid:  true,
 				Command:       command,
@@ -387,10 +392,12 @@ func (rf *Raft) checkApplyStateMachine() {
 				SnapshotTerm:  -1,
 				SnapshotIndex: -1,
 			}
-
+			rf.mu.Lock()
+			// only one goroutine modify lastApplied
 			log.Printf("%v: apply command to state machine: %v: %v!\n", rf.me, index, CommandToString(command))
+			rf.lastApplied = index
 		}
-		rf.lastApplied = rf.commitIndex
+		rf.mu.Unlock()
 	}
 
 }
@@ -585,7 +592,7 @@ func (rf *Raft) checkCommit() {
 			if satisfyCount >= totalServer/2+1 {
 				rf.commitIndex = N
 				//log.Printf("%v: start command success %v (%v/%v)!\n", rf.me, Log{term, command}, successCount, totalServer)
-				rf.checkApplyStateMachine()
+				rf.applyCond.Signal()
 				break
 			}
 		}
@@ -714,7 +721,7 @@ func (rf *Raft) becomeLeader(receiveVoteCount, totalSever int) {
 
 // call this function WITH lock.
 func (rf *Raft) sendLeaderHeartbeat() {
-	log.Printf("%v: send leader heartbeat, state=%v, currentTerm=%v.\n", rf.me, rf.state, rf.currentTerm)
+	log.Printf("%v: send HEARTBEAT, state=%v, currentTerm=%v.\n", rf.me, rf.state, rf.currentTerm)
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -738,12 +745,12 @@ func (rf *Raft) sendLeaderHeartbeat() {
 			defer rf.mu.Unlock()
 			if ok {
 				if reply.Term > rf.currentTerm {
-					log.Printf("%v -> %v: found higher term(%v > %v) when pressing heartbeat reply, changed %v to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm, rf.state)
+					log.Printf("%v -> %v: send HEARTBEAT, found higher term(%v > %v), changed %v to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm, rf.state)
 					rf.state = State_FOLLOWER
 					rf.currentTerm = args.Term
 				}
 			} else {
-				log.Printf("%v -> %v: receive invalid heartbeat reply.", rf.me, server)
+				log.Printf("%v -> %v: send HEARTBEAT, receive invalid reply.", rf.me, server)
 			}
 		}()
 	}
@@ -775,6 +782,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.votedFor = -1
 	rf.log = append(rf.log, Log{0, nil})
+	rf.applyCond = sync.NewCond(&rf.mu)
+
 	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
 
 	// initialize from state persisted before a crash
@@ -785,7 +794,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go func() {
 		for rf.killed() == false {
 			rf.mu.Lock()
-			log.Printf("%v: tick plus, rf=%v.\n", rf.me, rf)
+			log.Printf("%v: tick heartbeat, rf=%v.\n", rf.me, rf)
 			if rf.state == State_LEADER {
 				rf.sendLeaderHeartbeat()
 			}
@@ -793,6 +802,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			time.Sleep(140 * time.Millisecond)
 		}
 	}()
+	go rf.onApplyStateMachine()
 	//for server := range rf.peers {
 	//	if server == rf.me {
 	//		continue
