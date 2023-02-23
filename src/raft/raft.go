@@ -311,51 +311,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// decoder will convert nil to []
-	if args.Entries != nil && len(args.Entries) > 0 {
-		// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-		if args.PrevLogIndex < 0 || args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Team != args.PrevLogTerm {
-			log.Printf("%v <- %v: receiver's log doesn’t contain matcheing log when handling AppendEntries. args=%#v, rf=%v.\n", rf.me, args.LeaderId, args, rf)
-			reply.Success = false
-			reply.Term = rf.currentTerm
-			return
-		}
-		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and
-		//    all that follow it (§5.3)
-		// Since already check rf.log[args.PrevLogIndex].Team == args.PrevLogTerm, here args.PrevLogIndex < len(rf.log)
-		// raft log: -----xxxx++++
-		// args log:       xxx****
-		// consistencyCount is the number of 'x' in args log
-		//log.Printf("%v <- %v: accept.\n args=%#v\n rf=%v.\n", rf.me, args.LeaderId, args, rf.s())
-		var consistencyCount = len(args.Entries)
-		for i, logEntry := range args.Entries {
-			j := args.PrevLogIndex + 1 + i
-			if j >= len(rf.log) {
-				consistencyCount = i
-				//log.Panicf("a")
-				break
-			}
-			if rf.log[j].Team != logEntry.Team {
-				consistencyCount = i
-				//log.Panicf("b")
-				break
-			}
-		}
-		if deleteCount := len(rf.log) - (args.PrevLogIndex + consistencyCount + 1); deleteCount > 0 {
-			log.Printf("%v <- %v: delete %v inconsistent log.", rf.me, args.LeaderId, deleteCount)
-		}
-		rf.log = rf.log[:args.PrevLogIndex+1+consistencyCount]
-
-		// 4. Append any new entries not already in the log
-		rf.log = append(rf.log, args.Entries[consistencyCount:]...)
-		//fmt.Printf("\n%#v\n", rf.log)
-
-		reply.Success = true
-		reply.Term = rf.currentTerm
-	} else {
-		// just heartbeat
+	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	if args.PrevLogIndex < 0 || args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Team != args.PrevLogTerm {
+		log.Printf("%v <- %v: receiver's log doesn’t contain matcheing log when handling AppendEntries. args=%#v, rf=%v.\n", rf.me, args.LeaderId, args, rf)
 		reply.Success = false
 		reply.Term = rf.currentTerm
+		return
 	}
+	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and
+	//    all that follow it (§5.3)
+	// Since already check rf.log[args.PrevLogIndex].Team == args.PrevLogTerm, here args.PrevLogIndex < len(rf.log)
+	// raft log: -----xxxx++++
+	// args log:       xxx****
+	// consistencyCount is the number of 'x' in args log
+	//log.Printf("%v <- %v: accept.\n args=%#v\n rf=%v.\n", rf.me, args.LeaderId, args, rf.s())
+	var consistencyCount = len(args.Entries)
+	for i, logEntry := range args.Entries {
+		j := args.PrevLogIndex + 1 + i
+		if j >= len(rf.log) {
+			consistencyCount = i
+			//log.Panicf("a")
+			break
+		}
+		if rf.log[j].Team != logEntry.Team {
+			consistencyCount = i
+			//log.Panicf("b")
+			break
+		}
+	}
+	if deleteCount := len(rf.log) - (args.PrevLogIndex + consistencyCount + 1); deleteCount > 0 {
+		log.Printf("%v <- %v: delete %v inconsistent log.", rf.me, args.LeaderId, deleteCount)
+	}
+	rf.log = rf.log[:args.PrevLogIndex+1+consistencyCount]
+
+	// 4. Append any new entries not already in the log
+	rf.log = append(rf.log, args.Entries[consistencyCount:]...)
+	//fmt.Printf("\n%#v\n", rf.log)
+
+	reply.Success = true
+	reply.Term = rf.currentTerm
 
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
@@ -486,11 +480,14 @@ func (rf *Raft) checkSendAppendEntries(server int) bool {
 	// should send AppendEntries with THAT term to prevent incorrectly receiving outdated messages
 	args := AppendEntriesArgs{term, rf.me, prevLogIndex, prevLogTerm, rf.log[prevLogIndex+1:], rf.commitIndex}
 	reply := AppendEntriesReply{}
+	log.Printf("%v -> %v: send AppendEntries, args=%v.\n", rf.me, server, args)
 	rf.mu.Unlock()
 	ok := rf.sendAppendEntries(server, &args, &reply)
 	rf.mu.Lock()
-	log.Printf("%v -> %v: send AppendEntries, args=%v, ok=%v.\n", rf.me, server, args, ok)
-
+	if !ok {
+		log.Printf("%v -> %v: send AppendEntries, fail to get reply, retry.\n", rf.me, server)
+		return false
+	}
 	if reply.Term > rf.currentTerm {
 		log.Printf("%v -> %v: found higher term (%v > %v), change state to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm)
 		rf.currentTerm = reply.Term
@@ -517,6 +514,9 @@ func (rf *Raft) checkSendAppendEntries(server int) bool {
 
 // call this function WITH lock
 func (rf *Raft) checkCommit() {
+	if rf.state != State_LEADER {
+		return
+	}
 	// If there exists an N such that N > commitIndex, a majority
 	// of matchIndex[N] ≥ N, and log[N].term == currentTerm:
 	// set commitIndex = N
