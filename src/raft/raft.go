@@ -247,19 +247,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	lastLogIndex := len(rf.log) - 1
 
-	if rf.log[len(rf.log)-1].Team > args.Term {
+	if rf.currentTerm > args.Term {
 		// case1: Reply false if term < currentTerm (§5.1.1)
 		reply.VoteGranted = false
 	} else if (rf.votedFor < 0 || rf.currentTerm != args.Term || rf.votedFor == args.CandidateId) &&
-		(rf.log[len(rf.log)-1].Team < args.LastLogTerm || rf.log[len(rf.log)-1].Team == args.LastLogTerm && len(rf.log)-1 <= args.LastLogIndex) {
+		(rf.log[lastLogIndex].Team < args.LastLogTerm || (rf.log[lastLogIndex].Team == args.LastLogTerm && len(rf.log) <= args.LastLogIndex+1)) {
 		// case2: If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	} else {
 		reply.VoteGranted = false
 	}
-	log.Printf("%v <- %v: receive vote request. rf=%v, args=%#v\n", rf.me, args.CandidateId, rf, args)
+	log.Printf("%v <- %v: receive vote request. rf=%v, args=%#v, grantVote=%v.\n", rf.me, args.CandidateId, rf, args, reply.VoteGranted)
 
 	// must update rf.currentTerm after handle vote request, because here check rf.currentTerm != args.Term
 	if args.Term > rf.currentTerm {
@@ -479,11 +480,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					rf.mu.Lock()
 					prevLogIndex := rf.nextIndex[server] - 1
 					prevLogTerm := rf.log[prevLogIndex].Team
-
-					args := AppendEntriesArgs{rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, rf.log[rf.nextIndex[server]:], rf.commitIndex}
-					reply = AppendEntriesReply{}
+					// should send AppendEntries with THAT term to prevent incorrectly receiving outdated messages
+					args := AppendEntriesArgs{term, rf.me, prevLogIndex, prevLogTerm, rf.log[rf.nextIndex[server]:], rf.commitIndex}
 					rf.mu.Unlock()
 					for {
+						reply = AppendEntriesReply{}
 						ok := rf.sendAppendEntries(server, &args, &reply)
 						log.Printf("%v -> %v: send AppendEntries, args=%v.\n", rf.me, server, args)
 						if ok {
@@ -494,16 +495,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					}
 					rf.mu.Lock()
 					if reply.Term > rf.currentTerm {
+						log.Printf("%v -> %v: found higher term (%v > %v), change state to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm)
 						rf.currentTerm = reply.Term
 						rf.state = State_FOLLOWER
 						rf.mu.Unlock()
-						log.Printf("%v -> %v: found higher term (%v > %v), change state to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm)
 						return
 					}
+
 					if !reply.Success {
 						rf.nextIndex[server]--
 						log.Printf("%v -> %v: AppendEntries fail, decrease nextIndex to %v.\n", rf.me, server, rf.nextIndex[server])
 						rf.mu.Unlock()
+						if reply.Term > term {
+							// no need to retry
+							return
+						}
 					} else {
 						rf.mu.Unlock()
 						break
@@ -605,7 +611,7 @@ func (rf *Raft) ticker() {
 
 // call this function WITH lock.
 func (rf *Raft) kickOffElection() {
-	log.Printf("%v: kick off election, electionTimer=%v, currentTerm=%v.\n", rf.me, rf.electionTimer, rf.currentTerm)
+	log.Printf("%v: kick off election,rf=%v.\n", rf.me, rf)
 
 	// On conversion to candidate, start election:
 	//  Increment currentTerm
@@ -619,8 +625,8 @@ func (rf *Raft) kickOffElection() {
 	rf.state = State_CANDIDATE
 
 	totalSever := len(rf.peers)
-	//lastLogIndex := len(rf.log) - 1
-	args := RequestVoteArgs{rf.currentTerm, rf.me, rf.commitIndex, rf.log[rf.commitIndex].Team}
+	lastLogIndex := len(rf.log) - 1
+	args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, rf.log[lastLogIndex].Team}
 	var receiveVoteCount = 1
 	for server := 0; server < totalSever; server++ {
 		if server == rf.me {
@@ -650,6 +656,9 @@ func (rf *Raft) kickOffElection() {
 			if term != rf.currentTerm {
 				// even it still candidate, a new term begins.
 				log.Printf("%v -> %v: receive outdated RequestVodeReply, currentTerm=%v, but rf's term when sending is %v.\n", rf.me, server, rf.currentTerm, term)
+				return
+			}
+			if !reply.VoteGranted {
 				return
 			}
 			receiveVoteCount += 1
