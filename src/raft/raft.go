@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"sort"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -77,6 +79,18 @@ func maxInt(x, y int) int {
 		return x
 	}
 	return y
+
+}
+
+// find first occurrence log which term is given term in entries
+// assume len(entries) = n, then:
+// 1. if entries[i].Term == term, return the smallest i;
+// 2. if not found and given term is greater than entries[n-1], return n;
+// 3. else return the smallest such that entries[i].Term > term
+func searchTerm(entries []Log, term int) int {
+	return sort.Search(len(entries), func(i int) bool {
+		return entries[i].Team >= term
+	})
 
 }
 
@@ -222,6 +236,7 @@ func (rf *Raft) readPersist(data []byte) {
 	} else {
 		rf.log = entries
 	}
+	log.Printf("%v: boot from persisit.\n", rf.me)
 }
 
 //
@@ -306,7 +321,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	reply.Term = rf.currentTerm
-	log.Printf("%v <- %v: reply RequestVote. rf=%v, reply=%#v\n", rf.me, args.CandidateId, rf, reply)
+	log.Printf("%v <- %v: reply RequestVote. rf=%v, reply=%v\n", rf.me, args.CandidateId, rf, reply)
 }
 
 type AppendEntriesArgs struct {
@@ -319,12 +334,17 @@ type AppendEntriesArgs struct {
 }
 
 func (args AppendEntriesArgs) String() string {
-	return fmt.Sprintf("{Term=%v, LeaderId=%v, PrevLogTerm=%v, PrevLogIndex=%v, Entries=%v, LeaderCommit=%v}", args.Term, args.LeaderId, args.Entries, args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit)
+	return fmt.Sprintf("{Term=%v, LeaderId=%v, PrevLogTerm=%v, PrevLogIndex=%v, Entries=%v, LeaderCommit=%v}", args.Term, args.LeaderId, args.PrevLogTerm, args.PrevLogIndex, args.Entries, args.LeaderCommit)
 }
 
 type AppendEntriesReply struct {
 	Term    int  // currentTerm, for leader to update itself
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+
+	// reject message, -1 for none
+	XTerm  int // term in the conflicting entry (if any)
+	XIndex int // index of first entry with that term (if any)
+	XLen   int // log length
 }
 
 func (reply AppendEntriesReply) String() string {
@@ -339,8 +359,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.electionTimer = true
 
+	reply.XTerm = -1
+	reply.XIndex = -1
+	reply.XLen = -1
+
 	if args.Term > rf.currentTerm {
-		log.Printf("%v <- %v: receive AppendEntries, found higher term(%v > %v), changed %v to FOLLOWER.\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, rf.state)
+		log.Printf("%v <- %v: found higher term(%v > %v) when pressing AppendEntriesArgs, changed %v to FOLLOWER.\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, rf.state)
 		rf.state = State_FOLLOWER
 		rf.currentTerm = args.Term
 		rf.persist()
@@ -349,7 +373,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 1. Reply false if term < currentTerm (§5.1)
 	if args.Term < rf.currentTerm {
-		log.Printf("%v <- %v: receive AppendEntries, found it outdated, Term=%v, currentTerm=%v.\n", rf.me, args.LeaderId, args.Term, rf.currentTerm)
+		log.Printf("%v <- %v: found outdated AppendEntriesArgs, term=%v, currentTerm=%v.\n", rf.me, args.LeaderId, args.Term, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -357,9 +381,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if args.PrevLogIndex < 0 || args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Team != args.PrevLogTerm {
-		log.Printf("%v <- %v: receive AppendEntries, but receiver's log doesn’t contain matcheing. args=%#v, rf=%v.\n", rf.me, args.LeaderId, args, rf)
+
 		reply.Success = false
 		reply.Term = rf.currentTerm
+
+		reply.XLen = len(rf.log)
+
+		if args.PrevLogIndex < reply.XLen {
+			reply.XTerm = rf.log[args.PrevLogIndex].Team
+			reply.XIndex = searchTerm(rf.log[:args.PrevLogIndex], reply.XTerm)
+			if xterm1 := rf.log[reply.XIndex].Team; xterm1 != reply.XTerm {
+				log.Panicf("%v <- %v: binrary search fail, expect: %v, but get %v. rf=%v\n.", rf.me, args.LeaderId, reply.XTerm, xterm1, rf)
+			}
+		}
+		log.Printf("%v <- %v: receive AppendEntries, but receiver's log doesn’t contain matcheing. args=%v, rf=%v, reply=%v.\n", rf.me, args.LeaderId, args, rf, reply)
 		return
 	}
 	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and
@@ -369,28 +404,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// args log:       xxx****
 	// consistencyCount is the number of 'x' in args log (log that consistent with me in Entries)
 	//log.Printf("%v <- %v: accept.\n args=%#v\n rf=%v.\n", rf.me, args.LeaderId, args, rf.s())
-	var consistencyCount = len(args.Entries)
-	for i, logEntry := range args.Entries {
-		j := args.PrevLogIndex + 1 + i
-		if j >= len(rf.log) {
-			consistencyCount = i
-			//log.Panicf("a")
-			break
-		}
-		if rf.log[j].Team != logEntry.Team {
-			consistencyCount = i
-			//log.Panicf("b")
-			break
-		}
-	}
-	if deleteCount := len(rf.log) - (args.PrevLogIndex + consistencyCount + 1); deleteCount > 0 {
-		log.Printf("%v <- %v: receive AppendEntries, delete %v inconsistent log.", rf.me, args.LeaderId, deleteCount)
-	}
-	rf.log = rf.log[:args.PrevLogIndex+1+consistencyCount]
 
-	// 4. Append any new entries not already in the log
-	rf.log = append(rf.log, args.Entries[consistencyCount:]...)
-	rf.persist()
+	if len(args.Entries) > 0 {
+		lastConsistentIndex := args.PrevLogIndex
+		for index := args.PrevLogIndex + 1; index < len(rf.log); index++ {
+			j := index - (args.PrevLogIndex + 1)
+			if j >= len(args.Entries) {
+				lastConsistentIndex = len(rf.log) - 1
+				break
+			} else if rf.log[index].Team == args.Entries[j].Team {
+				lastConsistentIndex = index
+				continue
+			} else {
+				break
+			}
+		}
+
+		if lastConsistentIndex < len(rf.log) {
+			originLength := len(rf.log)
+			rf.log = rf.log[:lastConsistentIndex+1]
+			log.Printf("%v <- %v: delete %v inconsistent log when pressing AppendEntries.", rf.me, args.LeaderId, originLength-len(rf.log))
+		}
+
+		j := lastConsistentIndex - (args.PrevLogIndex + 1)
+		// 4. Append any new entries not already in the log
+		if j < len(args.Entries) {
+			entries := args.Entries[j+1:]
+			rf.log = append(rf.log, entries...)
+			log.Printf("%v <- %v: append %v log entries.", rf.me, args.LeaderId, len(entries))
+		}
+
+		rf.persist()
+	}
 	//fmt.Printf("\n%#v\n", rf.log)
 
 	reply.Success = true
@@ -401,11 +446,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		commitIndex := minInt(args.LeaderCommit, len(rf.log)-1)
 		rf.commitIndex = commitIndex
 	}
+	if len(rf.log) <= rf.commitIndex {
+		log.Panicf("%v <- %v: receive AppendEntries, but found len(rf.log)(%v) <= rf.commitIndex(%v), this may be bug, rf=%v.\n", rf.me, args.LeaderId, len(rf.log), rf.commitIndex, rf)
+	}
 	rf.applyCond.Signal()
 	if args.Entries != nil || len(args.Entries) != 0 {
-		log.Printf("%v <- %v: receive AppendEntries, accept AppendEntries. rf=%v, args=%v.\n", rf.me, args.LeaderId, rf, args)
+		log.Printf("%v <- %v: receive AppendEntries, accept AppendEntries. rf=%v, reply=%v.\n", rf.me, args.LeaderId, rf, reply)
 	}
-
 }
 
 // call this function WITHOUT lock
@@ -428,7 +475,7 @@ func (rf *Raft) onApplyStateMachine() {
 			}
 			rf.mu.Lock()
 			// only one goroutine modify lastApplied
-			log.Printf("%v: apply command to state machine: %v: %v!\n", rf.me, index, CommandToString(command))
+			log.Printf("%v: apply command to state machine: %v: %v, rf=%v!\n", rf.me, index, CommandToString(command), rf)
 			rf.lastApplied = index
 		}
 		rf.mu.Unlock()
@@ -575,14 +622,37 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 	if reply.Term > rf.currentTerm {
 		log.Printf("%v -> %v: send AppendEntries, found higher term (%v > %v) in reply, change state to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm)
 		rf.currentTerm = reply.Term
-		rf.state = State_FOLLOWER
 		rf.persist()
+		rf.state = State_FOLLOWER
+
+		return
+	}
+
+	if rf.currentTerm != term {
+		log.Printf("%v -> %v: send AppendEntries, get outdated reply, term(%v) != currentTerm(%v).\n", rf.me, server, term, rf.currentTerm)
 		return
 	}
 
 	if !reply.Success {
-		rf.nextIndex[server]--
-		log.Printf("%v -> %v: send AppendEntries, fail to get reply, decrease nextIndex to %v.\n", rf.me, server, rf.nextIndex[server])
+		var nextIndex int
+		if reply.XTerm >= 0 {
+			xindex1 := searchTerm(rf.log, reply.XTerm)
+			if xindex1 >= len(rf.log) || rf.log[xindex1].Team != reply.XTerm {
+				// Case 1: leader doesn't have XTerm
+				nextIndex = reply.XIndex
+				log.Printf("%v -> %v: send AppendEntries, leader doesn't have XTerm, nextIndex %v -> %v.\n", rf.me, server, rf.nextIndex[server], nextIndex)
+			} else {
+				// Case 2: leader has XTerm
+				nextIndex = xindex1
+				log.Printf("%v -> %v: send AppendEntries, leader has XTerm, nextIndex %v -> %v.\n", rf.me, server, rf.nextIndex[server], nextIndex)
+			}
+		} else {
+			// Case 3: follower's log is too short
+			nextIndex = reply.XLen
+			log.Printf("%v -> %v: send AppendEntries, follower's log is too short, nextIndex %v -> %v.\n", rf.me, server, rf.nextIndex[server], nextIndex)
+		}
+
+		rf.nextIndex[server] = nextIndex
 		retry = true
 		immediate = true
 		return
@@ -724,20 +794,20 @@ func (rf *Raft) kickOffElectionWithLock() {
 				return
 			}
 			if rf.state != State_CANDIDATE {
-				log.Printf("%v -> %v: send RequestVode, receive outdated reply, not leader now, rf=%v.\n", rf.me, server, rf)
+				log.Printf("%v -> %v: receive outdated RequestVodeReply, not leader now, rf=%v.\n", rf.me, server, rf)
 				return
 			}
 			if term != rf.currentTerm {
 				// even it still candidate, a new term is found (implicit a new election begin).
-				log.Printf("%v -> %v: send RequestVode, receive outdated reply, currentTerm=%v, but rf's term when sending is %v.\n", rf.me, server, rf.currentTerm, term)
+				log.Printf("%v -> %v: receive outdated RequestVodeReply, currentTerm=%v, but rf's term when sending is %v.\n", rf.me, server, rf.currentTerm, term)
 				return
 			}
 			if !reply.VoteGranted {
-				log.Printf("%v -> %v: send RequestVode, not voted.\n", rf.me, server)
+				log.Printf("%v -> %v: not voted.\n", rf.me, server)
 				return
 			}
 			receiveVoteCount += 1
-			log.Printf("%v -> %v: send RequestVode, get voted(%v/%v).\n", rf.me, server, receiveVoteCount, totalSever)
+			log.Printf("%v -> %v: get voted(%v/%v).\n", rf.me, server, receiveVoteCount, totalSever)
 			if receiveVoteCount == totalSever/2+1 {
 				//  If votes received from majority of servers: become leader
 				rf.becomeLeaderWithLock(receiveVoteCount, totalSever)
@@ -823,10 +893,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.votedFor = -1
 	rf.currentTerm = 0
-	rf.log = append(rf.log, Log{0, nil})
+	rf.log = []Log{Log{0, nil}}
 	rf.applyCond = sync.NewCond(&rf.mu)
 
 	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
+	//log.SetOutput(ioutil.Discard)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
