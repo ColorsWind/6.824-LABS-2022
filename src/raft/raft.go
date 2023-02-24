@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	"fmt"
 	"log"
 	"math/rand"
@@ -170,6 +172,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -192,6 +202,26 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	if err := d.Decode(&currentTerm); err != nil {
+		log.Panicf("%v: error at readPersist: currentTerm, err=%v.\n", rf.me, err)
+	} else {
+		rf.currentTerm = currentTerm
+	}
+	var votedFor int
+	if err := d.Decode(&votedFor); err != nil {
+		log.Panicf("%v: error at readPersist: votedFor, err=%v.\n", rf.me, err)
+	} else {
+		rf.votedFor = votedFor
+	}
+	var entries []Log
+	if err := d.Decode(&entries); err != nil {
+		log.Panicf("%v: error at readPersist: entries, err=%v.\n", rf.me, err)
+	} else {
+		rf.log = entries
+	}
 }
 
 //
@@ -261,6 +291,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		(rf.log[lastLogIndex].Team < args.LastLogTerm || (rf.log[lastLogIndex].Team == args.LastLogTerm && len(rf.log) <= args.LastLogIndex+1)) {
 		// case2: If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 		rf.votedFor = args.CandidateId
+		rf.persist()
 		reply.VoteGranted = true
 	} else {
 		reply.VoteGranted = false
@@ -271,6 +302,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		log.Printf("%v <- %v: recevier found higher term(%v > %v) when handling RequestVote, changed %v to FOLLOWER.\n", rf.me, args.CandidateId, args.Term, rf.currentTerm, rf.state)
 		rf.state = State_FOLLOWER
 		rf.currentTerm = args.Term
+		rf.persist()
 	}
 
 	reply.Term = rf.currentTerm
@@ -311,6 +343,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		log.Printf("%v <- %v: receive AppendEntries, found higher term(%v > %v), changed %v to FOLLOWER.\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, rf.state)
 		rf.state = State_FOLLOWER
 		rf.currentTerm = args.Term
+		rf.persist()
 
 	}
 
@@ -357,6 +390,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 4. Append any new entries not already in the log
 	rf.log = append(rf.log, args.Entries[consistencyCount:]...)
+	rf.persist()
 	//fmt.Printf("\n%#v\n", rf.log)
 
 	reply.Success = true
@@ -475,6 +509,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// append to leader's log
 	rf.log = append(rf.log, Log{term, command})
+	rf.persist()
 
 	lastLogIndex := len(rf.log) - 1
 
@@ -495,7 +530,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					break
 				}
 				if !immediate {
-					time.Sleep(10 * time.Millisecond)
+					time.Sleep(100 * time.Millisecond)
 				}
 			}
 		}()
@@ -541,6 +576,7 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 		log.Printf("%v -> %v: send AppendEntries, found higher term (%v > %v) in reply, change state to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm)
 		rf.currentTerm = reply.Term
 		rf.state = State_FOLLOWER
+		rf.persist()
 		return
 	}
 
@@ -656,6 +692,7 @@ func (rf *Raft) kickOffElectionWithLock() {
 	term := rf.currentTerm + 1
 	rf.currentTerm = term
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.electionTimer = true
 	rf.state = State_CANDIDATE
 
@@ -683,6 +720,7 @@ func (rf *Raft) kickOffElectionWithLock() {
 				log.Printf("%v -> %v: found higher term(%v > %v) when pressing RequestVodeReply. changed %v to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm, rf.state)
 				rf.state = State_FOLLOWER
 				rf.currentTerm = args.Term
+				rf.persist()
 				return
 			}
 			if rf.state != State_CANDIDATE {
@@ -750,6 +788,7 @@ func (rf *Raft) sendLeaderHeartbeatWithLock() {
 					log.Printf("%v -> %v: send HEARTBEAT, found higher term(%v > %v), changed %v to FOLLOWER.\n", rf.me, server, reply.Term, rf.currentTerm, rf.state)
 					rf.state = State_FOLLOWER
 					rf.currentTerm = args.Term
+					rf.persist()
 				}
 			} else {
 				log.Printf("%v -> %v: send HEARTBEAT, receive invalid reply.", rf.me, server)
@@ -783,6 +822,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.votedFor = -1
+	rf.currentTerm = 0
 	rf.log = append(rf.log, Log{0, nil})
 	rf.applyCond = sync.NewCond(&rf.mu)
 
