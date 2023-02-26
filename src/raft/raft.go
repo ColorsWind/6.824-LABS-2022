@@ -82,24 +82,57 @@ func maxInt(x, y int) int {
 
 }
 
-// find first occurrence log which term is given term in entries
-// assume len(entries) = n, then:
-// 1. if entries[i].Term == term, return the smallest i;
-// 2. if not found and given term is greater than entries[n-1], return n;
-// 3. else return the smallest such that entries[i].Term > term
-func searchTerm(entries []Log, term int) int {
-	return sort.Search(len(entries), func(i int) bool {
-		return entries[i].Team >= term
-	})
-
-}
-
 func CommandToString(c interface{}) string {
 	s := fmt.Sprintf("%v", c)
 	if len(s) > 5 {
 		s = s[:5]
 	}
 	return s
+}
+
+type LogsHolder struct {
+	SnapshotLen int   // the number of log Entries that have been trimmed because of snapshot
+	Entries     []Log // log Entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+}
+
+func (holder *LogsHolder) length() int {
+	return len(holder.Entries) + holder.SnapshotLen
+}
+
+func (holder *LogsHolder) append(entries ...Log) {
+	holder.Entries = append(holder.Entries, entries...)
+}
+
+func (holder *LogsHolder) slice(begin, end int) []Log {
+	return holder.Entries[begin-holder.SnapshotLen : end-holder.SnapshotLen]
+}
+
+func (holder *LogsHolder) trim(newLength int) {
+	holder.Entries = holder.Entries[:newLength-holder.SnapshotLen]
+}
+
+func (holder *LogsHolder) discard(lastIncludedIndex int) {
+	holder.Entries = holder.Entries[lastIncludedIndex+1-holder.SnapshotLen:]
+	holder.SnapshotLen = lastIncludedIndex + 1
+}
+
+func (holder *LogsHolder) get(index int) Log {
+	return holder.Entries[index-holder.SnapshotLen]
+}
+
+func (holder *LogsHolder) set(index int, entry Log) {
+	holder.Entries[index] = entry
+}
+
+// find first occurrence log which term is given term in entries
+// assume len(entries) = n, then:
+// 1. if entries[i].Term == term, return the smallest i;
+// 2. if not found and given term is greater than entries[n-1], return n;
+// 3. else return the smallest such that entries[i].Term > term
+func (holder *LogsHolder) searchTerm(term int, searchLen int) int {
+	return sort.Search(searchLen-holder.SnapshotLen, func(i int) bool {
+		return holder.Entries[i].Team >= term
+	}) + holder.SnapshotLen
 }
 
 //
@@ -126,9 +159,9 @@ type Raft struct {
 		Persistent state on all servers:
 		(Updated on stable storage before responding to RPCs)
 	*/
-	currentTerm int   // latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	votedFor    int   // candidateId that received vote in current term (or null if none)
-	log         []Log // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+	currentTerm int        // latest term server has seen (initialized to 0 on first boot, increases monotonically)
+	votedFor    int        // candidateId that received vote in current term (or null if none)
+	log         LogsHolder // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
 
 	/*
 		Volatile state on all servers:
@@ -230,11 +263,11 @@ func (rf *Raft) readPersist(data []byte) {
 	} else {
 		rf.votedFor = votedFor
 	}
-	var entries []Log
-	if err := d.Decode(&entries); err != nil {
-		log.Panicf("%v: error at readPersist: entries, err=%v.\n", rf.me, err)
+	var holder LogsHolder
+	if err := d.Decode(&holder); err != nil {
+		log.Panicf("%v: error at readPersist: holder, err=%v.\n", rf.me, err)
 	} else {
-		rf.log = entries
+		rf.log = holder
 	}
 	log.Printf("%v: boot from persisit.\n", rf.me)
 }
@@ -246,7 +279,6 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
-
 	return true
 }
 
@@ -256,7 +288,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
 }
 
 //
@@ -297,13 +328,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	log.Printf("%v <- %v: receive RequestVote. rf=%v, args=%v\n", rf.me, args.CandidateId, rf, args)
-	lastLogIndex := len(rf.log) - 1
+	lastLogIndex := rf.log.length() - 1
 
 	if rf.currentTerm > args.Term {
 		// case1: Reply false if term < currentTerm (§5.1.1)
 		reply.VoteGranted = false
 	} else if (rf.votedFor < 0 || rf.currentTerm != args.Term || rf.votedFor == args.CandidateId) &&
-		(rf.log[lastLogIndex].Team < args.LastLogTerm || (rf.log[lastLogIndex].Team == args.LastLogTerm && len(rf.log) <= args.LastLogIndex+1)) {
+		(rf.log.get(lastLogIndex).Team < args.LastLogTerm || (rf.log.get(lastLogIndex).Team == args.LastLogTerm && rf.log.length() <= args.LastLogIndex+1)) {
 		// case2: If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 		rf.votedFor = args.CandidateId
 		rf.persist()
@@ -380,17 +411,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	if args.PrevLogIndex < 0 || args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Team != args.PrevLogTerm {
+	if args.PrevLogIndex < 0 || args.PrevLogIndex >= rf.log.length() || rf.log.get(args.PrevLogIndex).Team != args.PrevLogTerm {
 
 		reply.Success = false
 		reply.Term = rf.currentTerm
 
-		reply.XLen = len(rf.log)
+		reply.XLen = rf.log.length()
 
 		if args.PrevLogIndex < reply.XLen {
-			reply.XTerm = rf.log[args.PrevLogIndex].Team
-			reply.XIndex = searchTerm(rf.log[:args.PrevLogIndex], reply.XTerm)
-			if xterm1 := rf.log[reply.XIndex].Team; xterm1 != reply.XTerm {
+			reply.XTerm = rf.log.get(args.PrevLogIndex).Team
+			reply.XIndex = rf.log.searchTerm(reply.XTerm, args.PrevLogIndex)
+			if xterm1 := rf.log.get(reply.XIndex).Team; xterm1 != reply.XTerm {
 				log.Panicf("%v <- %v: binrary search fail, expect: %v, but get %v. rf=%v\n.", rf.me, args.LeaderId, reply.XTerm, xterm1, rf)
 			}
 		}
@@ -399,7 +430,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and
 	//    all that follow it (§5.3)
-	// Since already check rf.log[args.PrevLogIndex].Team == args.PrevLogTerm, here args.PrevLogIndex < len(rf.log)
+	// Since already check rf.log[args.PrevLogIndex].Team == args.PrevLogTerm, here args.PrevLogIndex < rf.log.length()
 	// raft log: -----xxxx++++
 	// args log:       xxx****
 	// consistencyCount is the number of 'x' in args log (log that consistent with me in Entries)
@@ -407,12 +438,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if len(args.Entries) > 0 {
 		lastConsistentIndex := args.PrevLogIndex
-		for index := args.PrevLogIndex + 1; index < len(rf.log); index++ {
+		for index := args.PrevLogIndex + 1; index < rf.log.length(); index++ {
 			j := index - (args.PrevLogIndex + 1)
 			if j >= len(args.Entries) {
-				lastConsistentIndex = len(rf.log) - 1
+				lastConsistentIndex = rf.log.length() - 1
 				break
-			} else if rf.log[index].Team == args.Entries[j].Team {
+			} else if rf.log.get(index).Team == args.Entries[j].Team {
 				lastConsistentIndex = index
 				continue
 			} else {
@@ -420,17 +451,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 
-		if lastConsistentIndex < len(rf.log) {
-			originLength := len(rf.log)
-			rf.log = rf.log[:lastConsistentIndex+1]
-			log.Printf("%v <- %v: delete %v inconsistent log when pressing AppendEntries.", rf.me, args.LeaderId, originLength-len(rf.log))
+		if lastConsistentIndex < rf.log.length() {
+			originLength := rf.log.length()
+			rf.log.trim(lastConsistentIndex + 1)
+			log.Printf("%v <- %v: delete %v inconsistent log when pressing AppendEntries.", rf.me, args.LeaderId, originLength-rf.log.length())
 		}
 
 		j := lastConsistentIndex - (args.PrevLogIndex + 1)
 		// 4. Append any new entries not already in the log
 		if j < len(args.Entries) {
 			entries := args.Entries[j+1:]
-			rf.log = append(rf.log, entries...)
+			rf.log.append(entries...)
 			log.Printf("%v <- %v: append %v log entries.", rf.me, args.LeaderId, len(entries))
 		}
 
@@ -443,11 +474,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
-		commitIndex := minInt(args.LeaderCommit, len(rf.log)-1)
+		commitIndex := minInt(args.LeaderCommit, rf.log.length()-1)
 		rf.commitIndex = commitIndex
 	}
-	if len(rf.log) <= rf.commitIndex {
-		log.Panicf("%v <- %v: receive AppendEntries, but found len(rf.log)(%v) <= rf.commitIndex(%v), this may be bug, rf=%v.\n", rf.me, args.LeaderId, len(rf.log), rf.commitIndex, rf)
+	if rf.log.length() <= rf.commitIndex {
+		log.Panicf("%v <- %v: receive AppendEntries, but found rf.log.length()(%v) <= rf.commitIndex(%v), this may be bug, rf=%v.\n", rf.me, args.LeaderId, rf.log.length(), rf.commitIndex, rf)
 	}
 	rf.applyCond.Signal()
 	if args.Entries != nil || len(args.Entries) != 0 {
@@ -462,7 +493,7 @@ func (rf *Raft) onApplyStateMachine() {
 		rf.applyCond.Wait()
 		for rf.commitIndex > rf.lastApplied {
 			index := rf.lastApplied + 1
-			command := rf.log[index].Command
+			command := rf.log.get(index).Command
 			rf.mu.Unlock()
 			rf.applyCh <- ApplyMsg{
 				CommandValid:  true,
@@ -550,15 +581,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-	index = len(rf.log)
+	index = rf.log.length()
 	term = rf.currentTerm
 	isLeader = true
 
 	// append to leader's log
-	rf.log = append(rf.log, Log{term, command})
+	rf.log.append(Log{term, command})
 	rf.persist()
 
-	lastLogIndex := len(rf.log) - 1
+	lastLogIndex := rf.log.length() - 1
 
 	for server := 0; server < len(rf.peers); server++ {
 		if server == rf.me {
@@ -596,16 +627,16 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 		return
 	}
 
-	lastLogIndex := len(rf.log) - 1
+	lastLogIndex := rf.log.length() - 1
 	if lastLogIndex < rf.nextIndex[server] || lastLogIndex != expectLastLogIndex {
 		return
 	}
 
 	term := rf.currentTerm
 	prevLogIndex := rf.nextIndex[server] - 1
-	prevLogTerm := rf.log[prevLogIndex].Team
+	prevLogTerm := rf.log.get(prevLogIndex).Team
 	// should send AppendEntries with THAT term to prevent incorrectly receiving outdated messages
-	args := AppendEntriesArgs{term, rf.me, prevLogIndex, prevLogTerm, rf.log[prevLogIndex+1:], rf.commitIndex}
+	args := AppendEntriesArgs{term, rf.me, prevLogIndex, prevLogTerm, rf.log.slice(prevLogIndex+1, rf.log.length()), rf.commitIndex}
 	reply := AppendEntriesReply{}
 	log.Printf("%v -> %v: send AppendEntries, args=%v.\n", rf.me, server, args)
 
@@ -636,8 +667,8 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 	if !reply.Success {
 		var nextIndex int
 		if reply.XTerm >= 0 {
-			xindex1 := searchTerm(rf.log, reply.XTerm)
-			if xindex1 >= len(rf.log) || rf.log[xindex1].Team != reply.XTerm {
+			xindex1 := rf.log.searchTerm(rf.log.length(), reply.XTerm)
+			if xindex1 >= rf.log.length() || rf.log.get(xindex1).Team != reply.XTerm {
 				// Case 1: leader doesn't have XTerm
 				nextIndex = reply.XIndex
 				log.Printf("%v -> %v: send AppendEntries, leader doesn't have XTerm, nextIndex %v -> %v.\n", rf.me, server, rf.nextIndex[server], nextIndex)
@@ -682,8 +713,8 @@ func (rf *Raft) checkCommitWithLock() {
 	// of matchIndex[N] ≥ N, and log[N].term == currentTerm:
 	// set commitIndex = N
 	totalServer := len(rf.peers)
-	for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
-		if rf.log[N].Team != rf.currentTerm {
+	for N := rf.log.length() - 1; N > rf.commitIndex; N-- {
+		if rf.log.get(N).Team != rf.currentTerm {
 			break
 		}
 		var satisfyCount = 1
@@ -767,8 +798,8 @@ func (rf *Raft) kickOffElectionWithLock() {
 	rf.state = State_CANDIDATE
 
 	totalSever := len(rf.peers)
-	lastLogIndex := len(rf.log) - 1
-	args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, rf.log[lastLogIndex].Team}
+	lastLogIndex := rf.log.length() - 1
+	args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, rf.log.get(lastLogIndex).Team}
 	var receiveVoteCount = 1
 	for server := 0; server < totalSever; server++ {
 		if server == rf.me {
@@ -823,7 +854,7 @@ func (rf *Raft) becomeLeaderWithLock(receiveVoteCount, totalSever int) {
 	rf.state = State_LEADER
 	rf.sendLeaderHeartbeatWithLock()
 	for k := 0; k < totalSever; k++ {
-		rf.nextIndex[k] = len(rf.log)
+		rf.nextIndex[k] = rf.log.length()
 		rf.matchIndex[k] = 0
 	}
 
@@ -835,8 +866,8 @@ func (rf *Raft) sendLeaderHeartbeatWithLock() {
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
-		PrevLogIndex: len(rf.log) - 1,
-		PrevLogTerm:  rf.log[len(rf.log)-1].Team,
+		PrevLogIndex: rf.log.length() - 1,
+		PrevLogTerm:  rf.log.get(rf.log.length() - 1).Team,
 		Entries:      nil,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -893,7 +924,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.votedFor = -1
 	rf.currentTerm = 0
-	rf.log = []Log{Log{0, nil}}
+	rf.log = LogsHolder{0, []Log{Log{0, nil}}}
 	rf.applyCond = sync.NewCond(&rf.mu)
 
 	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
