@@ -130,7 +130,7 @@ func (holder *LogsHolder) get(index int) Log {
 }
 
 func (holder *LogsHolder) getTerm(index int) int {
-	if index == holder.length()-1 && len(holder.Entries) == 0 && holder.SnapshotLastIncludedIndex >= 0 {
+	if index-holder.EntriesFirstIndex == -1 && holder.SnapshotLastIncludedIndex >= 0 {
 		return holder.SnapshotLastIncludedTerm
 	}
 	return holder.Entries[index-holder.EntriesFirstIndex].Team
@@ -167,8 +167,12 @@ func (holder *LogsHolder) applySnapshot(data []byte, index int, term int) {
 	holder.EntriesFirstIndex = index + 1
 }
 
-func (holder *LogsHolder) hasHold(index int) bool {
-	return index-holder.EntriesFirstIndex >= 0 && len(holder.Entries) > 0
+func (holder *LogsHolder) containTerm(index int) bool {
+	return index-holder.EntriesFirstIndex >= -1
+}
+
+func (holder *LogsHolder) containLogEntryTerm(index int) bool {
+	return index-holder.EntriesFirstIndex >= 0
 }
 
 //func (holder *LogsHolder) hasNewerSnapshot(index int, term int) bool {
@@ -343,7 +347,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	accept := rf.log.SnapshotLastIncludedIndex < lastIncludedIndex
+	accept := rf.log.SnapshotLastIncludedIndex <= lastIncludedIndex
 	log.Printf("%v: service wants to switch to Snapshot, term=%v, index=%v, accept=%v", rf.me, lastIncludedTerm, lastIncludedIndex, accept)
 	return accept
 }
@@ -413,7 +417,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// case1: Reply false if term < currentTerm (§5.1.1)
 		reply.VoteGranted = false
 	} else if (rf.votedFor < 0 || rf.currentTerm != args.Term || rf.votedFor == args.CandidateId) &&
-		(rf.log.get(lastLogIndex).Team < args.LastLogTerm || (rf.log.get(lastLogIndex).Team == args.LastLogTerm && rf.log.length() <= args.LastLogIndex+1)) {
+		(rf.log.getTerm(lastLogIndex) < args.LastLogTerm || (rf.log.getTerm(lastLogIndex) == args.LastLogTerm && rf.log.length() <= args.LastLogIndex+1)) {
 		// case2: If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 		rf.votedFor = args.CandidateId
 		rf.persist()
@@ -574,7 +578,7 @@ func (rf *Raft) onApplyStateMachine() {
 		rf.applyCond.Wait()
 		for rf.commitIndex > rf.lastApplied {
 			index := rf.lastApplied + 1
-			if rf.log.hasHold(index) {
+			if rf.log.containLogEntryTerm(index) {
 				command := rf.log.get(index).Command
 
 				rf.mu.Unlock()
@@ -648,8 +652,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.state = State_FOLLOWER
 		reply.Term = rf.currentTerm
 	}
-	if rf.log.SnapshotLastIncludedIndex >= args.LastIncludedIndex {
-		log.Printf("%v <- %v: receive InstallSnapshot, found higher LastIncludeIndex (%v >= %v), current is newer.\n", rf.me, args.LeaderId, rf.log.SnapshotLastIncludedIndex, args.LastIncludedIndex)
+	if rf.log.SnapshotLastIncludedIndex > args.LastIncludedIndex {
+		log.Printf("%v <- %v: receive InstallSnapshot, found higher LastIncludeIndex (%v > %v), current is newer.\n", rf.me, args.LeaderId, rf.log.SnapshotLastIncludedIndex, args.LastIncludedIndex)
 		return
 	}
 	rf.log.applySnapshot(args.Data, args.LastIncludedIndex, args.LastIncludedTerm)
@@ -792,8 +796,9 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 	}
 	term := rf.currentTerm
 	prevLogIndex := rf.nextIndex[server] - 1
-	if rf.log.hasHold(prevLogIndex) {
-		prevLogTerm := rf.log.get(prevLogIndex).Team
+	log.Printf("%v -> %v: checkSendAppendEntries, prevLogIndex=%v, rf=%v.\n", rf.me, server, prevLogIndex, rf)
+	if rf.log.containTerm(prevLogIndex) {
+		prevLogTerm := rf.log.getTerm(prevLogIndex)
 		// should send AppendEntries with THAT term to prevent incorrectly receiving outdated messages
 		args := AppendEntriesArgs{term, rf.me, prevLogIndex, prevLogTerm, rf.log.slice(prevLogIndex+1, rf.log.length()), rf.commitIndex}
 		reply := AppendEntriesReply{}
@@ -901,7 +906,7 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 			retry = true
 			immediate = true
 		}
-		log.Printf("%v -> %v: send InstallSnapshot, success, nextIndex=%v.\n", rf.me, server, rf.nextIndex[server])
+		log.Printf("%v -> %v: send InstallSnapshot, success, nextIndex=%v, rf=%v.\n", rf.me, server, rf.nextIndex[server], rf)
 	}
 
 	success = true
