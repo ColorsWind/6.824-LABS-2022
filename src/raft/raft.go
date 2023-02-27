@@ -21,6 +21,7 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"sort"
@@ -170,7 +171,7 @@ func (holder *LogsHolder) containTerm(index int) bool {
 	return index-holder.EntriesFirstIndex >= -1
 }
 
-func (holder *LogsHolder) containLogEntryTerm(index int) bool {
+func (holder *LogsHolder) containLogEntry(index int) bool {
 	return index-holder.EntriesFirstIndex >= 0
 }
 
@@ -508,7 +509,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	// Because of snapshot, cases are complicated.
-	if args.PrevLogIndex < rf.log.length() && !rf.log.containLogEntryTerm(args.PrevLogIndex) {
+	if args.PrevLogIndex < rf.log.length() && !rf.log.containLogEntry(args.PrevLogIndex) {
 		if args.PrevLogIndex+1+len(args.Entries) >= rf.log.length() {
 			// here exists useful entries, rewrite args
 			args.Entries = args.Entries[rf.log.SnapshotLastIncludedIndex+1-(args.PrevLogIndex+1):]
@@ -605,7 +606,7 @@ func (rf *Raft) onApplyStateMachine() {
 		rf.applyCond.Wait()
 		for rf.commitIndex > rf.lastApplied {
 			index := rf.lastApplied + 1
-			if rf.log.containLogEntryTerm(index) {
+			if rf.log.containLogEntry(index) {
 				command := rf.log.get(index).Command
 
 				rf.mu.Unlock()
@@ -1170,7 +1171,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCond = sync.NewCond(&rf.mu)
 
 	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
-	//log.SetOutput(ioutil.Discard)
+	log.SetOutput(ioutil.Discard)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
