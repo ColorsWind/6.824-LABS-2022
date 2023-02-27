@@ -95,8 +95,8 @@ type LogsHolder struct {
 	EntriesFirstIndex         int   // the number of log Entries that have been trimmed because of Snapshot
 	Entries                   []Log // log Entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
 	Snapshot                  []byte
-	SnapshotLastIncludedTerm  int
 	SnapshotLastIncludedIndex int
+	SnapshotLastIncludedTerm  int
 }
 
 func (holder LogsHolder) String() string {
@@ -153,8 +153,7 @@ func (holder *LogsHolder) searchTerm(term int, searchLen int) int {
 
 func (holder *LogsHolder) applySnapshot(data []byte, index int, term int) {
 	if index <= holder.SnapshotLastIncludedIndex {
-		// ignore
-		return
+		return // ignore
 	}
 	if index >= holder.length() {
 		holder.Entries = []Log{}
@@ -291,15 +290,18 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 
-	e.Encode(rf.log)
+	e.Encode(rf.log.EntriesFirstIndex)
+	e.Encode(rf.log.Entries)
+	e.Encode(rf.log.SnapshotLastIncludedIndex)
+	e.Encode(rf.log.SnapshotLastIncludedTerm)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	rf.persister.SaveStateAndSnapshot(data, rf.log.Snapshot)
 }
 
 //
 // restore previously persisted state.
 //
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, snapshot []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -331,8 +333,11 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.votedFor = votedFor
 	}
 	var holder LogsHolder
-	if err := d.Decode(&holder); err != nil {
-		log.Panicf("%v: error at readPersist: holder, err=%v.\n", rf.me, err)
+	holder.Snapshot = snapshot
+	if err1, err2, err3, err4 :=
+		d.Decode(&holder.EntriesFirstIndex), d.Decode(rf.log.Entries), d.Decode(rf.log.SnapshotLastIncludedIndex),
+		d.Decode(rf.log.SnapshotLastIncludedTerm); err1 != nil && err2 != nil && err3 != nil && err4 != nil {
+		log.Panicf("%v: error at readPersist: holder, err1=%v, err2=%v, err3=%v, err4=%v.\n", rf.me, err1, err2, err3, err4)
 	} else {
 		rf.log = holder
 	}
@@ -1146,7 +1151,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//log.SetOutput(ioutil.Discard)
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
