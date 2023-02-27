@@ -84,22 +84,22 @@ func maxInt(x, y int) int {
 
 func CommandToString(c interface{}) string {
 	s := fmt.Sprintf("%v", c)
-	if len(s) > 5 {
-		s = s[:5]
+	if len(s) > 10 {
+		s = s[:10]
 	}
 	return s
 }
 
 type LogsHolder struct {
-	EntriesFirstIndex int   // the number of log Entries that have been trimmed because of Snapshot
-	Entries           []Log // log Entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
-	Snapshot          []byte
-	LastIncludedTerm  int
-	LastIncludedIndex int
+	EntriesFirstIndex         int   // the number of log Entries that have been trimmed because of Snapshot
+	Entries                   []Log // log Entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+	Snapshot                  []byte
+	SnapshotLastIncludedTerm  int
+	SnapshotLastIncludedIndex int
 }
 
 func (holder LogsHolder) String() string {
-	return fmt.Sprintf("{EntriesFirstIndex=%v, Entries=%v, Snapshot={len=%v}, LastIncludedTerm=%v, LastIncludedIndex=%v}", holder.EntriesFirstIndex, holder.Entries, len(holder.Snapshot), holder.LastIncludedTerm, holder.LastIncludedIndex)
+	return fmt.Sprintf("{EntriesFirstIndex=%v, Entries=%v, Snapshot={Len=%v, LastIncludedTerm=%v, LastIncludedIndex=%v}}", holder.EntriesFirstIndex, holder.Entries, len(holder.Snapshot), holder.SnapshotLastIncludedTerm, holder.SnapshotLastIncludedIndex)
 }
 
 func (holder *LogsHolder) length() int {
@@ -116,22 +116,16 @@ func (holder *LogsHolder) slice(begin, end int) []Log {
 
 func (holder *LogsHolder) trim(newLength int) {
 	holder.Entries = holder.Entries[:newLength-holder.EntriesFirstIndex]
-}
 
-func (holder *LogsHolder) discard() {
-	// we should discard more log as more, but we should guarantee at least one entry in log
-	newFirstIndex := minInt(holder.LastIncludedIndex+1, holder.length()-1)
-	holder.Entries = holder.Entries[newFirstIndex-holder.EntriesFirstIndex:]
-	holder.EntriesFirstIndex = newFirstIndex
 }
 
 func (holder *LogsHolder) get(index int) Log {
 	return holder.Entries[index-holder.EntriesFirstIndex]
 }
 
-func (holder *LogsHolder) set(index int, entry Log) {
-	holder.Entries[index] = entry
-}
+//func (holder *LogsHolder) set(index int, entry Log) {
+//	holder.Entries[index] = entry
+//}
 
 // find first occurrence log which term is given term in entries
 // assume len(entries) = n, then:
@@ -145,30 +139,44 @@ func (holder *LogsHolder) searchTerm(term int, searchLen int) int {
 }
 
 func (holder *LogsHolder) applySnapshot(data []byte, index int, term int) {
+	if index <= holder.SnapshotLastIncludedIndex {
+		// ignore
+		return
+	}
+	if index >= holder.length() {
+		holder.Entries = []Log{}
+	} else {
+		holder.Entries = holder.Entries[index-holder.EntriesFirstIndex:]
+	}
 	holder.Snapshot = data
-	holder.LastIncludedIndex = index
-	holder.LastIncludedTerm = term
-	// FIXME: handle holder.LastIncludedIndex >= holder.length()
-	//if holder.LastIncludedIndex >= holder.length() {
-	//	holder.Entries = []Log{}
-	//	holder.EntriesFirstIndex = holder.LastIncludedIndex + 1
-	//} else {
-	//
-	//}
+	holder.SnapshotLastIncludedIndex = index
+	holder.SnapshotLastIncludedTerm = term
+	holder.EntriesFirstIndex = holder.SnapshotLastIncludedIndex + 1
 }
 
 func (holder *LogsHolder) hasHold(index int) bool {
-	return index-holder.EntriesFirstIndex >= 0
+	return index-holder.EntriesFirstIndex >= 0 && len(holder.Entries) > 0
 }
 
-func (holder *LogsHolder) hasNewerSnapshot(index int, term int) bool {
-	if holder.LastIncludedTerm > term {
-		return true
-	} else if holder.LastIncludedTerm == term {
-		return holder.LastIncludedIndex > index
-	} else {
-		return false
+//func (holder *LogsHolder) hasNewerSnapshot(index int, term int) bool {
+//	if holder.LastIncludedTerm > term {
+//		return true
+//	} else if holder.LastIncludedTerm == term {
+//		return holder.LastIncludedIndex > index
+//	} else {
+//		return false
+//	}
+//}
+
+func (holder *LogsHolder) getPrevLogIndex() int {
+	return holder.SnapshotLastIncludedIndex + len(holder.Entries)
+}
+
+func (holder *LogsHolder) getPrevLogTerm() int {
+	if len(holder.Entries) > 0 {
+		return holder.Entries[len(holder.Entries)-1].Team
 	}
+	return holder.SnapshotLastIncludedTerm
 }
 
 //
@@ -218,7 +226,10 @@ type Raft struct {
 }
 
 func (rf *Raft) String() string {
-	return fmt.Sprintf("{me=%v, state=%v, electionTimer=%v, currentTerm=%v, voteFor=%v, commitIndex=%v, lastApply=%v, nextIndex=%v, log=%v}", rf.me, rf.state, rf.electionTimer, rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastApplied, rf.nextIndex, rf.log)
+	return fmt.Sprintf("{me=%v, state=%v, electionTimer=%v, currentTerm=%v, voteFor=%v, commitIndex=%v, "+
+		"lastApply=%v, nextIndex=%v, matchIndex=%v, log=%v}",
+		rf.me, rf.state, rf.electionTimer, rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastApplied,
+		rf.nextIndex, rf.matchIndex, rf.log)
 }
 
 // struct for log entry
@@ -319,9 +330,9 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	hasNewer := rf.log.hasNewerSnapshot(lastIncludedIndex, lastIncludedTerm)
-	log.Printf("%v: service wants to switch to Snapshot, term=%v, index=%v, allow=%v", rf.me, lastIncludedTerm, lastIncludedIndex, !hasNewer)
-	return !hasNewer
+	accept := rf.log.SnapshotLastIncludedIndex < lastIncludedIndex
+	log.Printf("%v: service wants to switch to Snapshot, term=%v, index=%v, accept=%v", rf.me, lastIncludedTerm, lastIncludedIndex, accept)
+	return accept
 }
 
 // the service says it has created a Snapshot that has
@@ -337,7 +348,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	log.Printf("%v: query snapshot last included index. index=%v, queryTerm=%v\n", rf.me, index, term)
 	// reserve at least one log entry
 	rf.log.applySnapshot(snapshot, index, term)
-	rf.log.discard()
 	rf.persist()
 	log.Printf("%v: after discard, rf=%v.\n", rf.me, rf)
 }
@@ -572,12 +582,12 @@ func (rf *Raft) onApplyStateMachine() {
 					CommandIndex:  -1,
 					SnapshotValid: true,
 					Snapshot:      rf.log.Snapshot,
-					SnapshotTerm:  rf.log.LastIncludedTerm,
-					SnapshotIndex: rf.log.LastIncludedIndex,
+					SnapshotTerm:  rf.log.SnapshotLastIncludedTerm,
+					SnapshotIndex: rf.log.SnapshotLastIncludedIndex,
 				}
 				rf.mu.Lock()
-				log.Printf("%v: apply snapshot to state machine: index=%v: term=%v, rf=%v!\n", rf.me, index, rf.log.LastIncludedTerm, rf)
-				rf.lastApplied = rf.log.LastIncludedIndex
+				log.Printf("%v: apply snapshot to state machine: index=%v: term=%v, rf=%v!\n", rf.me, index, rf.log.SnapshotLastIncludedTerm, rf)
+				rf.lastApplied = rf.log.SnapshotLastIncludedIndex
 			}
 		}
 		rf.mu.Unlock()
@@ -620,8 +630,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.state = State_FOLLOWER
 		reply.Term = rf.currentTerm
 	}
-	if rf.log.LastIncludedIndex >= args.LastIncludedIndex {
-		log.Printf("%v <- %v: receive InstallSnapshot, found higher LastIncludeIndex (%v >= %v), current is newer.\n", rf.me, args.LeaderId, rf.log.LastIncludedIndex, args.LastIncludedTerm)
+	if rf.log.SnapshotLastIncludedIndex >= args.LastIncludedIndex {
+		log.Printf("%v <- %v: receive InstallSnapshot, found higher LastIncludeIndex (%v >= %v), current is newer.\n", rf.me, args.LeaderId, rf.log.SnapshotLastIncludedIndex, args.LastIncludedTerm)
 		return
 	}
 	rf.log.applySnapshot(args.Data, args.LastIncludedIndex, args.LastIncludedTerm)
@@ -719,21 +729,23 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 		server := server
 		go func() {
+			rf.mu.Lock()
 			for {
-				rf.mu.Lock()
 				retry, immediate, success := rf.checkSendAppendEntriesWithLock(server, term, lastLogIndex)
 				if success {
 					rf.checkCommitWithLock()
 				}
 				log.Printf("%v -> %v: retry=%v, immediate=%v, success=%v, nextIndex=%v, matchIndex=%v.\n", rf.me, server, retry, immediate, success, rf.nextIndex[server], rf.matchIndex[server])
-				rf.mu.Unlock()
 				if !retry {
 					break
 				}
 				if !immediate {
+					rf.mu.Unlock()
 					time.Sleep(100 * time.Millisecond)
+					rf.mu.Lock()
 				}
 			}
+			rf.mu.Unlock()
 		}()
 	}
 
@@ -830,8 +842,7 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 		log.Printf("%v -> %v: send AppendEntries, success, nextIndex=%v.\n", rf.me, server, rf.nextIndex[server])
 
 	} else {
-
-		args := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.log.LastIncludedIndex, rf.log.LastIncludedTerm, rf.log.Snapshot}
+		args := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.log.SnapshotLastIncludedIndex, rf.log.SnapshotLastIncludedTerm, rf.log.Snapshot}
 		reply := InstallSnapshotReply{}
 		log.Printf("%v -> %v: prevLogIndex=%v, which has beed discarded. Send InstallSnapshot. args=%v.\n", rf.me, server, prevLogIndex, args)
 		rf.mu.Unlock()
@@ -864,9 +875,11 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 				rf.matchIndex[server] = args.LastIncludedIndex
 			}
 		}
-		retry = true
-		immediate = true
-		success = true
+		if rf.nextIndex[server] < rf.log.length() {
+			// need another AppendEntries RPC
+			retry = true
+			immediate = true
+		}
 		log.Printf("%v -> %v: send InstallSnapshot, success, nextIndex=%v.\n", rf.me, server, rf.nextIndex[server])
 	}
 
@@ -1036,8 +1049,8 @@ func (rf *Raft) sendLeaderHeartbeatWithLock() {
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
-		PrevLogIndex: rf.log.length() - 1,
-		PrevLogTerm:  rf.log.get(rf.log.length() - 1).Team,
+		PrevLogIndex: rf.log.getPrevLogIndex(),
+		PrevLogTerm:  rf.log.getPrevLogTerm(),
 		Entries:      nil,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -1095,11 +1108,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.currentTerm = 0
 	rf.log = LogsHolder{
-		EntriesFirstIndex: 0,
-		Entries:           []Log{{0, nil}},
-		Snapshot:          nil,
-		LastIncludedIndex: -1,
-		LastIncludedTerm:  -1,
+		EntriesFirstIndex:         0,
+		Entries:                   []Log{{0, nil}},
+		Snapshot:                  nil,
+		SnapshotLastIncludedIndex: -1,
+		SnapshotLastIncludedTerm:  -1,
 	}
 	rf.applyCond = sync.NewCond(&rf.mu)
 
