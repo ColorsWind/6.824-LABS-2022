@@ -332,14 +332,22 @@ func (rf *Raft) readPersist(data []byte, snapshot []byte) {
 	} else {
 		rf.votedFor = votedFor
 	}
-	var holder LogsHolder
-	holder.Snapshot = snapshot
+	var entriesFirstIndex int
+	var entries []Log
+	var snapshotLastIncludedIndex int
+	var snapshotLastIncludedTerm int
 	if err1, err2, err3, err4 :=
-		d.Decode(&holder.EntriesFirstIndex), d.Decode(rf.log.Entries), d.Decode(rf.log.SnapshotLastIncludedIndex),
-		d.Decode(rf.log.SnapshotLastIncludedTerm); err1 != nil && err2 != nil && err3 != nil && err4 != nil {
+		d.Decode(&entriesFirstIndex), d.Decode(&entries), d.Decode(&snapshotLastIncludedIndex),
+		d.Decode(&snapshotLastIncludedTerm); err1 != nil && err2 != nil && err3 != nil && err4 != nil {
 		log.Panicf("%v: error at readPersist: holder, err1=%v, err2=%v, err3=%v, err4=%v.\n", rf.me, err1, err2, err3, err4)
 	} else {
-		rf.log = holder
+		rf.log = LogsHolder{
+			EntriesFirstIndex:         entriesFirstIndex,
+			Entries:                   entries,
+			Snapshot:                  snapshot,
+			SnapshotLastIncludedIndex: snapshotLastIncludedIndex,
+			SnapshotLastIncludedTerm:  snapshotLastIncludedIndex,
+		}
 	}
 	log.Printf("%v: boot from persisit.\n", rf.me)
 }
@@ -499,6 +507,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	// Because of snapshot, cases are complicated.
+	if args.PrevLogIndex < rf.log.length() && !rf.log.containLogEntryTerm(args.PrevLogIndex) {
+		if args.PrevLogIndex+1+len(args.Entries) >= rf.log.length() {
+			// here exists useful entries, rewrite args
+			args.Entries = args.Entries[rf.log.SnapshotLastIncludedIndex+1-(args.PrevLogIndex+1):]
+			args.PrevLogIndex = rf.log.SnapshotLastIncludedIndex
+			args.PrevLogTerm = rf.log.SnapshotLastIncludedTerm
+		} else {
+			// everything outdated
+			reply.Success = true
+			reply.Term = rf.currentTerm
+			return
+		}
+	}
 	if args.PrevLogIndex < 0 || args.PrevLogIndex >= rf.log.length() || rf.log.getTerm(args.PrevLogIndex) != args.PrevLogTerm {
 
 		reply.Success = false
@@ -507,9 +529,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if len(args.Entries) > 0 {
 			reply.XLen = rf.log.length()
 			if args.PrevLogIndex < reply.XLen {
-				reply.XTerm = rf.log.get(args.PrevLogIndex).Team
+				reply.XTerm = rf.log.getTerm(args.PrevLogIndex)
 				reply.XIndex = rf.log.searchTerm(reply.XTerm, args.PrevLogIndex)
-				if xterm1 := rf.log.get(reply.XIndex).Team; xterm1 != reply.XTerm {
+				if xterm1 := rf.log.getTerm(reply.XIndex); xterm1 != reply.XTerm {
 					log.Panicf("%v <- %v: binrary search fail, expect: %v, but get %v. rf=%v\n.", rf.me, args.LeaderId, reply.XTerm, xterm1, rf)
 				}
 			}
