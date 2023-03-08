@@ -1,9 +1,13 @@
 package kvraft
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+	"log"
+	"time"
+)
 import "crypto/rand"
+import math_rand "math/rand"
 import "math/big"
-
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -20,6 +24,8 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
+	//log.SetOutput(ioutil.Discard)
 	// You'll have to add code here.
 	return ck
 }
@@ -37,9 +43,29 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	args := GetArgs{key}
+	for {
+		reply := GetReply{}
+		i := math_rand.Intn(len(ck.servers))
+		log.Printf("c -> %v: Call Get. args=%v.\n", i, args)
+		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+		if !ok {
+			log.Printf("c -> %v: Fail to call GET.\n", i)
+			continue
+		}
+		switch reply.Err {
+		case OK:
+			log.Printf("c -> %v: Successfully finished Get, reply=%v.\n", i, reply)
+			return reply.Value
+		case ErrNoKey:
+			return ""
+		default:
+			log.Printf("c -> %v: Call GET, return error=%v.\n", i, reply.Err)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+	}
 }
 
 //
@@ -53,7 +79,24 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := PutAppendArgs{key, value, op}
+	for {
+		reply := PutAppendReply{}
+		i := math_rand.Intn(len(ck.servers))
+		log.Printf("c -> %v: Call PutAppend. args=%v.\n", i, args)
+		ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+		if !ok {
+			log.Printf("c -> %v: Fail to call PutAppend.\n", i)
+			continue
+		}
+		if reply.Err == OK {
+			log.Printf("c -> %v: Successfully finished PutAppend, reply=%v.\n", i, reply)
+			return
+		} else {
+			log.Printf("c -> %v: Call PutAppend, return error=%v.\n", i, reply.Err)
+			continue
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

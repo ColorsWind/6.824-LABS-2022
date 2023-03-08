@@ -7,9 +7,10 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -18,11 +19,25 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type OpType string
+
+const (
+	OpType_GET        = "OpType_GET"
+	OpType_PUT_APPEND = "OpType_PUT_APPEND"
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Type  OpType
+	Key   string
+	Value string
+}
+
+type ApplyChEvent struct {
+	index int
+	//term  int
 }
 
 type KVServer struct {
@@ -35,15 +50,58 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	stateMachine map[string]string
+	waitingEvent map[int]chan ApplyChEvent
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	event := make(chan ApplyChEvent)
+	kv.mu.Lock()
+	// is safe to Start first then add event handle to waitingEvent, because Get hold mu
+	index, _, isLeader := kv.rf.Start(Op{OpType_GET, args.Key, ""})
+	if isLeader {
+		kv.waitingEvent[index] = event
+	}
+	kv.mu.Unlock()
+	if isLeader {
+		<-event
+		element, exist := kv.stateMachine[args.Key]
+		if exist {
+			reply.Err = OK
+			reply.Value = element
+		} else {
+			reply.Err = ErrNoKey
+		}
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	event := make(chan ApplyChEvent)
+	kv.mu.Lock()
+
+	index, _, isLeader := kv.rf.Start(Op{OpType_PUT_APPEND, args.Key, args.Value})
+	if isLeader {
+		kv.waitingEvent[index] = event
+	}
+	kv.mu.Unlock()
+	if isLeader {
+		<-event
+		reply.Err = OK
+		if args.Op == "Put" {
+			kv.stateMachine[args.Key] = args.Value
+		} else if args.Op == "Append" {
+			kv.stateMachine[args.Key] += args.Value
+		} else {
+			log.Panicf("Op is not Put or Append: %v.", args)
+		}
+
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 }
 
 //
@@ -96,6 +154,20 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-
+	kv.stateMachine = make(map[string]string)
+	kv.waitingEvent = make(map[int]chan ApplyChEvent)
+	go func() {
+		for !kv.killed() {
+			select {
+			case msg := <-kv.applyCh:
+				kv.mu.Lock()
+				event := kv.waitingEvent[msg.CommandIndex]
+				kv.mu.Unlock()
+				event <- ApplyChEvent{msg.CommandIndex}
+			default:
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}()
 	return kv
 }
