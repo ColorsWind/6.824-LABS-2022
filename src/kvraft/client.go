@@ -13,6 +13,7 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	lastKnownLeader int
+	lastOpId        int64
 }
 
 func nrand() int64 {
@@ -46,7 +47,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-	args := GetArgs{key}
+	args := GetArgs{key, nrand(), ck.lastOpId}
 	for {
 		reply := GetReply{}
 		log.Printf("c -> %v: Call Get. args=%v.\n", ck.lastKnownLeader, args)
@@ -56,11 +57,10 @@ func (ck *Clerk) Get(key string) string {
 			continue
 		}
 		switch reply.Err {
-		case OK:
+		case OK, ErrNoKey:
 			log.Printf("c -> %v: Successfully finished Get, reply=%v.\n", ck.lastKnownLeader, reply)
+			ck.lastOpId = args.UniqueId
 			return reply.Value
-		case ErrNoKey:
-			return ""
 		case ErrWrongLeader:
 			ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 			fallthrough
@@ -83,10 +83,9 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{key, value, op}
+	args := PutAppendArgs{key, value, op, nrand(), ck.lastOpId}
 	for {
 		reply := PutAppendReply{}
-
 		log.Printf("c -> %v: Call PutAppend. args=%v.\n", ck.lastKnownLeader, args)
 		ok := ck.servers[ck.lastKnownLeader].Call("KVServer.PutAppend", &args, &reply)
 		if !ok {

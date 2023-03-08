@@ -85,10 +85,10 @@ func maxInt(x, y int) int {
 
 }
 
-func CommandToString(c interface{}) string {
+func ToStringLimited(c interface{}, limit int) string {
 	s := fmt.Sprintf("%v", c)
-	if len(s) > 10 {
-		s = s[:10]
+	if len(s) > limit {
+		s = s[:limit]
 	}
 	return s
 }
@@ -104,7 +104,7 @@ type LogsHolder struct {
 func (holder LogsHolder) String() string {
 	logsString := make([]string, len(holder.Entries))
 	for index, logEntry := range holder.Entries {
-		logsString[index] = fmt.Sprintf("%v | %v | %v", index+holder.EntriesFirstIndex, CommandToString(logEntry.Command), logEntry.Team)
+		logsString[index] = fmt.Sprintf("%v | %v | %v", index+holder.EntriesFirstIndex, ToStringLimited(logEntry.Command, 10), logEntry.Team)
 	}
 	logString := fmt.Sprintf("[%v]", strings.Join(logsString, ", "))
 	return fmt.Sprintf("{EntriesFirstIndex=%v, Entries=%v, Snapshot={len=%v}, LastIncludedTerm=%v, LastIncludedIndex=%v}", holder.EntriesFirstIndex, logString, len(holder.Snapshot), holder.SnapshotLastIncludedTerm, holder.SnapshotLastIncludedIndex)
@@ -258,7 +258,7 @@ type Log struct {
 }
 
 func (l Log) String() string {
-	return fmt.Sprintf("Log{cmd=%v, term=%v}", CommandToString(l.Command), l.Team)
+	return fmt.Sprintf("Log{cmd=%v, term=%v}", ToStringLimited(l.Command, 10), l.Team)
 }
 
 // return currentTerm and whether this server
@@ -623,7 +623,7 @@ func (rf *Raft) onApplyStateMachine() {
 				}
 				rf.mu.Lock()
 				// only one goroutine modify lastApplied, so we can do this directly.
-				rf.logger.Printf("%v: apply command to state machine: index=%v, command=%v, rf=%v!\n", rf.me, index, CommandToString(command), rf)
+				rf.logger.Printf("%v: apply command to state machine: index=%v, command=%v, rf=%v!\n", rf.me, index, ToStringLimited(command, 10), rf)
 				rf.lastApplied = index
 			} else {
 				msg := ApplyMsg{
@@ -757,10 +757,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := false
 	// Your code here (2B).
-	rf.logger.Printf("%v: Start: %v\n", rf.me, CommandToString(command))
+	rf.logger.Printf("%v: Start: %v\n", rf.me, ToStringLimited(command, 10))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.logger.Printf("%v: Start: %v, GetState Success, rf=%v.\n", rf.me, CommandToString(command), rf)
+	rf.logger.Printf("%v: Start: %v, GetState Success, rf=%v.\n", rf.me, ToStringLimited(command, 10), rf)
 	if rf.state != State_LEADER {
 		return index, term, isLeader
 	}

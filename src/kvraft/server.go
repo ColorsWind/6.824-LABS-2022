@@ -22,22 +22,19 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 type OpType string
 
 const (
-	OpType_GET        = "OpType_GET"
-	OpType_PUT_APPEND = "OpType_PUT_APPEND"
+	OpType_GET    = "OpType_GET"
+	OpType_PUT    = "OpType_PUT"
+	OpType_APPEND = "OpType_APPEND"
 )
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Type  OpType
-	Key   string
-	Value string
-}
-
-type ApplyChEvent struct {
-	index int
-	//term  int
+	UniqueId int64
+	Type     OpType
+	Key      string
+	Value    string
 }
 
 type KVServer struct {
@@ -51,60 +48,82 @@ type KVServer struct {
 
 	// Your definitions here.
 	stateMachine map[string]string
-	waitingEvent map[int]chan ApplyChEvent
+	opCachesById map[int64]*OpCache
+	opCachesList []*OpCache
+}
+
+func (kv *KVServer) createOpCacheWithLock(op Op, term int) *OpCache {
+	opCache := NewOpCache(op.Type, op.Value, op.Key, term, op.UniqueId)
+	kv.opCachesById[opCache.uniqueId] = opCache
+	kv.opCachesList = append(kv.opCachesList, opCache)
+	return opCache
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	event := make(chan ApplyChEvent)
 	kv.mu.Lock()
-	// is safe to Start first then add event handle to waitingEvent, because Get hold mu
-	index, _, isLeader := kv.rf.Start(Op{OpType_GET, args.Key, ""})
+	opCache, present := kv.opCachesById[args.UniqueId]
+	kv.mu.Unlock()
+	if present {
+		result, err := opCache.get()
+		reply.Value = result
+		reply.Err = err
+		return
+	}
+	// is safe to Start first then add event handle to opCachesById, because Get hold mu
+	kv.mu.Lock()
+	op := Op{args.UniqueId, OpType_GET, args.Key, ""}
+	_, currentTerm, isLeader := kv.rf.Start(op)
 	if isLeader {
-		kv.waitingEvent[index] = event
+		opCache = kv.createOpCacheWithLock(op, currentTerm)
 	}
 	kv.mu.Unlock()
+
 	if isLeader {
-		<-event
-		kv.mu.Lock()
-		element, exist := kv.stateMachine[args.Key]
-		if exist {
-			reply.Err = OK
-			reply.Value = element
-		} else {
-			reply.Err = ErrNoKey
-		}
-		kv.mu.Unlock()
+		result, err := opCache.get()
+		reply.Value = result
+		reply.Err = err
 	} else {
 		reply.Err = ErrWrongLeader
 	}
+
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	event := make(chan ApplyChEvent)
 	kv.mu.Lock()
+	opCache, present := kv.opCachesById[args.UniqueId]
+	kv.mu.Unlock()
+	if present {
+		_, err := opCache.get()
+		reply.Err = err
+		return
+	}
 
-	index, _, isLeader := kv.rf.Start(Op{OpType_PUT_APPEND, args.Key, args.Value})
+	var opType OpType
+	if args.Op == "Put" {
+		opType = OpType_PUT
+	} else if args.Op == "Append" {
+		opType = OpType_APPEND
+	} else {
+		log.Panicf("Op is not Put or Append: %v.", args)
+	}
+
+	kv.mu.Lock()
+	op := Op{args.UniqueId, opType, args.Key, args.Value}
+	_, currentTerm, isLeader := kv.rf.Start(op)
 	if isLeader {
-		kv.waitingEvent[index] = event
+		opCache = kv.createOpCacheWithLock(op, currentTerm)
 	}
 	kv.mu.Unlock()
+
 	if isLeader {
-		<-event
-		reply.Err = OK
-		kv.mu.Lock()
-		if args.Op == "Put" {
-			kv.stateMachine[args.Key] = args.Value
-		} else if args.Op == "Append" {
-			kv.stateMachine[args.Key] += args.Value
-		} else {
-			log.Panicf("Op is not Put or Append: %v.", args)
-		}
-		kv.mu.Unlock()
+		_, err := opCache.get()
+		reply.Err = err
 	} else {
 		reply.Err = ErrWrongLeader
 	}
+
 }
 
 //
@@ -158,15 +177,47 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.stateMachine = make(map[string]string)
-	kv.waitingEvent = make(map[int]chan ApplyChEvent)
+	kv.opCachesById = make(map[int64]*OpCache)
 	go func() {
 		for !kv.killed() {
 			select {
 			case msg := <-kv.applyCh:
 				kv.mu.Lock()
-				event := kv.waitingEvent[msg.CommandIndex]
+				command := msg.Command.(Op)
+				opCache, present := kv.opCachesById[command.UniqueId]
+				if !present {
+					kv.mu.Unlock()
+					return
+				}
+				result := ""
+
+				switch command.Type {
+				case OpType_GET:
+					result = kv.stateMachine[command.Key]
+				case OpType_PUT:
+					kv.stateMachine[command.Key] = command.Value
+				case OpType_APPEND:
+					kv.stateMachine[command.Key] = kv.stateMachine[command.Key] + command.Value
+				default:
+					log.Panicf("Could not identify OpType: %v.", command.Type)
+				}
+				//log.Printf("!!!%v, %v, %v\n", result, opCache.opType, kv.stateMachine)
+				// a msg's term smaller than the current applied ones indicate that the msg (and any msg below it)
+				// will never be completed.
+				i := 0
+				for ; i < len(kv.opCachesList); i++ {
+					if kv.opCachesList[i].term >= opCache.term {
+						break
+					}
+				}
+				failedOpCaches := kv.opCachesList[:i]
+				kv.opCachesList = kv.opCachesList[i:]
 				kv.mu.Unlock()
-				event <- ApplyChEvent{msg.CommandIndex}
+
+				opCache.complete(result, OK)
+				for _, failedOpCache := range failedOpCaches {
+					failedOpCache.completeIfUnfinished("", ErrWrongLeader)
+				}
 			default:
 				time.Sleep(50 * time.Millisecond)
 			}
