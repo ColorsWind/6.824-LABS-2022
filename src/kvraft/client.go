@@ -6,12 +6,13 @@ import (
 	"time"
 )
 import "crypto/rand"
-import math_rand "math/rand"
+import mathRand "math/rand"
 import "math/big"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	lastKnownLeader int
 }
 
 func nrand() int64 {
@@ -24,6 +25,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
 	//log.SetOutput(ioutil.Discard)
 	// You'll have to add code here.
@@ -47,21 +49,23 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{key}
 	for {
 		reply := GetReply{}
-		i := math_rand.Intn(len(ck.servers))
-		log.Printf("c -> %v: Call Get. args=%v.\n", i, args)
-		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+		log.Printf("c -> %v: Call Get. args=%v.\n", ck.lastKnownLeader, args)
+		ok := ck.servers[ck.lastKnownLeader].Call("KVServer.Get", &args, &reply)
 		if !ok {
-			log.Printf("c -> %v: Fail to call GET.\n", i)
+			log.Printf("c -> %v: Fail to call GET.\n", ck.lastKnownLeader)
 			continue
 		}
 		switch reply.Err {
 		case OK:
-			log.Printf("c -> %v: Successfully finished Get, reply=%v.\n", i, reply)
+			log.Printf("c -> %v: Successfully finished Get, reply=%v.\n", ck.lastKnownLeader, reply)
 			return reply.Value
 		case ErrNoKey:
 			return ""
+		case ErrWrongLeader:
+			ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
+			fallthrough
 		default:
-			log.Printf("c -> %v: Call GET, return error=%v.\n", i, reply.Err)
+			log.Printf("c -> %v: Call GET, return error=%v.\n", ck.lastKnownLeader, reply.Err)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -82,18 +86,23 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{key, value, op}
 	for {
 		reply := PutAppendReply{}
-		i := math_rand.Intn(len(ck.servers))
-		log.Printf("c -> %v: Call PutAppend. args=%v.\n", i, args)
-		ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+
+		log.Printf("c -> %v: Call PutAppend. args=%v.\n", ck.lastKnownLeader, args)
+		ok := ck.servers[ck.lastKnownLeader].Call("KVServer.PutAppend", &args, &reply)
 		if !ok {
-			log.Printf("c -> %v: Fail to call PutAppend.\n", i)
+			log.Printf("c -> %v: Fail to call PutAppend.\n", ck.lastKnownLeader)
 			continue
 		}
-		if reply.Err == OK {
-			log.Printf("c -> %v: Successfully finished PutAppend, reply=%v.\n", i, reply)
+		switch reply.Err {
+		case OK:
+			log.Printf("c -> %v: Successfully finished PutAppend, reply=%v.\n", ck.lastKnownLeader, reply)
 			return
-		} else {
-			log.Printf("c -> %v: Call PutAppend, return error=%v.\n", i, reply.Err)
+		case ErrWrongLeader:
+			ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
+			fallthrough
+		default:
+			log.Printf("c -> %v: Call PUT_APPEND, return error=%v.\n", ck.lastKnownLeader, reply.Err)
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 	}
