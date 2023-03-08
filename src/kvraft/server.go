@@ -66,6 +66,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Unlock()
 	if isLeader {
 		<-event
+		kv.mu.Lock()
 		element, exist := kv.stateMachine[args.Key]
 		if exist {
 			reply.Err = OK
@@ -73,6 +74,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		} else {
 			reply.Err = ErrNoKey
 		}
+		kv.mu.Unlock()
 	} else {
 		reply.Err = ErrWrongLeader
 	}
@@ -91,6 +93,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	if isLeader {
 		<-event
 		reply.Err = OK
+		kv.mu.Lock()
 		if args.Op == "Put" {
 			kv.stateMachine[args.Key] = args.Value
 		} else if args.Op == "Append" {
@@ -98,7 +101,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		} else {
 			log.Panicf("Op is not Put or Append: %v.", args)
 		}
-
+		kv.mu.Unlock()
 	} else {
 		reply.Err = ErrWrongLeader
 	}
