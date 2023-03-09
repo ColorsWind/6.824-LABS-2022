@@ -68,6 +68,7 @@ type OpCache struct {
 	key      string
 	value    string
 	term     int
+	index    int
 	uniqueId int64
 	result   string
 	err      Err
@@ -77,13 +78,14 @@ func (oc *OpCache) String() string {
 	return fmt.Sprintf("{opType=%v, key=%v, value=%v, term=%v, id=%v, result=%v, err=%v}", oc.opType, oc.key, oc.value, oc.term, oc.uniqueId, oc.result, oc.err)
 }
 
-func NewOpCache(opType OpType, key string, value string, term int, uniqueId int64) *OpCache {
+func NewOpCache(opType OpType, key string, value string, term int, index int, uniqueId int64) *OpCache {
 	oc := OpCache{}
 	oc.cond = sync.NewCond(&oc.mu)
 	oc.opType = opType
 	oc.key = key
 	oc.value = value
 	oc.term = term
+	oc.index = index
 	oc.uniqueId = uniqueId
 	oc.err = WaitComplete
 	return &oc

@@ -52,8 +52,8 @@ type KVServer struct {
 	opCachesList []*OpCache
 }
 
-func (kv *KVServer) createOpCacheWithLock(op Op, term int) *OpCache {
-	opCache := NewOpCache(op.Type, op.Value, op.Key, term, op.UniqueId)
+func (kv *KVServer) createOpCacheWithLock(op Op, term int, index int) *OpCache {
+	opCache := NewOpCache(op.Type, op.Value, op.Key, term, index, op.UniqueId)
 	kv.opCachesById[opCache.uniqueId] = opCache
 	kv.opCachesList = append(kv.opCachesList, opCache)
 	return opCache
@@ -62,6 +62,10 @@ func (kv *KVServer) createOpCacheWithLock(op Op, term int) *OpCache {
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
+
+	// prevId reveal already accept op
+	delete(kv.opCachesById, args.PrevRecvId)
+
 	opCache, present := kv.opCachesById[args.UniqueId]
 	kv.mu.Unlock()
 	if present {
@@ -73,9 +77,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// is safe to Start first then add event handle to opCachesById, because Get hold mu
 	kv.mu.Lock()
 	op := Op{args.UniqueId, OpType_GET, args.Key, ""}
-	_, currentTerm, isLeader := kv.rf.Start(op)
+	index, currentTerm, isLeader := kv.rf.Start(op)
 	if isLeader {
-		opCache = kv.createOpCacheWithLock(op, currentTerm)
+		opCache = kv.createOpCacheWithLock(op, currentTerm, index)
 	}
 	kv.mu.Unlock()
 
@@ -93,6 +97,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
 	opCache, present := kv.opCachesById[args.UniqueId]
+
+	// prevId reveal already accept op
+	delete(kv.opCachesById, args.PrevRecvId)
+	log.Printf("opCachesById Size: %v, opCachesList size: %v\n", len(kv.opCachesById), len(kv.opCachesList))
 	kv.mu.Unlock()
 	if present {
 		_, err := opCache.get()
@@ -111,9 +119,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	kv.mu.Lock()
 	op := Op{args.UniqueId, opType, args.Key, args.Value}
-	_, currentTerm, isLeader := kv.rf.Start(op)
+	index, currentTerm, isLeader := kv.rf.Start(op)
 	if isLeader {
-		opCache = kv.createOpCacheWithLock(op, currentTerm)
+		opCache = kv.createOpCacheWithLock(op, currentTerm, index)
 	}
 	kv.mu.Unlock()
 
@@ -202,11 +210,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 					log.Panicf("Could not identify OpType: %v.", command.Type)
 				}
 				//log.Printf("!!!%v, %v, %v\n", result, opCache.opType, kv.stateMachine)
-				// a msg's term smaller than the current applied ones indicate that the msg (and any msg below it)
-				// will never be completed.
+				// a msg's term smaller than the current applied ones, or equal term but smaller index,
+				// indicate that the msg (and any msg below it), will never be completed.
 				i := 0
 				for ; i < len(kv.opCachesList); i++ {
-					if kv.opCachesList[i].term >= opCache.term {
+					if kv.opCachesList[i].term > opCache.term || kv.opCachesList[i].term == opCache.term && kv.opCachesList[i].index > opCache.index {
 						break
 					}
 				}

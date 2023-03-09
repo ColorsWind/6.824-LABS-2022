@@ -48,6 +48,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	args := GetArgs{key, nrand(), ck.lastOpId}
+	ck.lastOpId = args.UniqueId
 	for {
 		reply := GetReply{}
 		log.Printf("c -> %v: Call Get. args=%v.\n", ck.lastKnownLeader, args)
@@ -84,6 +85,7 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{key, value, op, nrand(), ck.lastOpId}
+	ck.lastOpId = args.UniqueId
 	for {
 		reply := PutAppendReply{}
 		log.Printf("c -> %v: Call PutAppend. args=%v.\n", ck.lastKnownLeader, args)
