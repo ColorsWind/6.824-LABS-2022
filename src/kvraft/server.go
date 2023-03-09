@@ -4,6 +4,7 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -31,10 +32,15 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	UniqueId int64
-	Type     OpType
-	Key      string
-	Value    string
+	ClientId  int64
+	CommandId int64
+	Type      OpType
+	Key       string
+	Value     string
+}
+
+func (op Op) String() string {
+	return fmt.Sprintf("client_id=%v, cmd_id=%v, type=%v, key=%v, value=%v", op.ClientId, op.CommandId, op.Type, op.Key, op.Value)
 }
 
 type KVServer struct {
@@ -48,72 +54,66 @@ type KVServer struct {
 
 	// Your definitions here.
 	stateMachine map[string]string
-	opCachesById map[int64]*OpCache
 	opCachesList []*OpCache
+	clients      map[int64]*OpCache
 }
 
 func (kv *KVServer) createOpCacheWithLock(op Op, term int, index int) *OpCache {
-	opCache := NewOpCache(op.Type, op.Value, op.Key, term, index, op.UniqueId)
-	kv.opCachesById[opCache.uniqueId] = opCache
+	opCache := NewOpCache(op.ClientId, op.CommandId, op.Type, op.Key, op.Value, term, index)
+	kv.clients[opCache.clientId] = opCache
 	kv.opCachesList = append(kv.opCachesList, opCache)
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		if opCache.completeIfUnfinished("", ErrWrongLeader) {
+			log.Printf("%v: %v timeout.\n", kv.me, opCache)
+		}
+
+	}()
 	return opCache
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-
-	// prevId reveal already accept op
-	delete(kv.opCachesById, args.PrevRecvId)
-
-	opCache, present := kv.opCachesById[args.UniqueId]
-	kv.mu.Unlock()
-	if present {
-		result, err := opCache.get()
-		reply.Value = result
-		reply.Err = err
-		return
-	}
-	// is safe to Start first then add event handle to opCachesById, because Get hold mu
-	kv.mu.Lock()
-	op := Op{args.UniqueId, OpType_GET, args.Key, ""}
-	index, currentTerm, isLeader := kv.rf.Start(op)
-	if isLeader {
-		opCache = kv.createOpCacheWithLock(op, currentTerm, index)
-	}
-	kv.mu.Unlock()
-
-	if isLeader {
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			if opCache.completeIfUnfinished("", ErrWrongLeader) {
-				log.Printf("%v Get timeout,\n", kv.me)
+	defer kv.mu.Unlock()
+	opCache, present := kv.clients[args.ClientId]
+	if !present || args.CommandId == opCache.commandId+1 {
+		// new command
+		op := Op{args.ClientId, args.CommandId, OpType_GET, args.Key, ""}
+		index, currentTerm, isLeader := kv.rf.Start(op)
+		if isLeader {
+			opCache = kv.createOpCacheWithLock(op, currentTerm, index)
+			kv.mu.Unlock()
+			result, err := opCache.get()
+			reply.Value = result
+			reply.Err = err
+			kv.mu.Lock()
+			if err != OK {
+				delete(kv.clients, args.ClientId)
 			}
-		}()
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	} else if args.CommandId == opCache.commandId {
+		// duplicate command
+		kv.mu.Unlock()
 		result, err := opCache.get()
 		reply.Value = result
 		reply.Err = err
-
+		kv.mu.Lock()
+		if err != OK {
+			delete(kv.clients, args.ClientId)
+		}
 	} else {
-		reply.Err = ErrWrongLeader
+		log.Panicf("kvserver %v receive invalid id. args=%v, opCache=%v.", kv.me, args, opCache)
 	}
-
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
-	opCache, present := kv.opCachesById[args.UniqueId]
-
-	// prevId reveal already accept op
-	delete(kv.opCachesById, args.PrevRecvId)
-	log.Printf("opCachesById Size: %v, opCachesList size: %v\n", len(kv.opCachesById), len(kv.opCachesList))
-	kv.mu.Unlock()
-	if present {
-		_, err := opCache.get()
-		reply.Err = err
-		return
-	}
+	defer kv.mu.Unlock()
+	opCache, present := kv.clients[args.ClientId]
 
 	var opType OpType
 	if args.Op == "Put" {
@@ -124,27 +124,34 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		log.Panicf("Op is not Put or Append: %v.", args)
 	}
 
-	kv.mu.Lock()
-	op := Op{args.UniqueId, opType, args.Key, args.Value}
-	index, currentTerm, isLeader := kv.rf.Start(op)
-	if isLeader {
-		opCache = kv.createOpCacheWithLock(op, currentTerm, index)
-	}
-	kv.mu.Unlock()
-
-	if isLeader {
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			if opCache.completeIfUnfinished("", ErrWrongLeader) {
-				log.Printf("%v PutAppend timeout,\n", kv.me)
+	if !present || args.CommandId == opCache.commandId+1 {
+		// new command
+		op := Op{args.ClientId, args.CommandId, opType, args.Key, args.Value}
+		index, currentTerm, isLeader := kv.rf.Start(op)
+		if isLeader {
+			opCache = kv.createOpCacheWithLock(op, currentTerm, index)
+			kv.mu.Unlock()
+			_, err := opCache.get()
+			reply.Err = err
+			kv.mu.Lock()
+			if err != OK {
+				delete(kv.clients, args.ClientId)
 			}
-		}()
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	} else if args.CommandId == opCache.commandId {
+		// duplicate command
+		kv.mu.Unlock()
 		_, err := opCache.get()
 		reply.Err = err
+		kv.mu.Lock()
+		if err != OK {
+			delete(kv.clients, args.ClientId)
+		}
 	} else {
-		reply.Err = ErrWrongLeader
+		log.Panicf("kvserver %v receive invalid id. args=%v, opCache=%v.", kv.me, args, opCache)
 	}
-
 }
 
 //
@@ -168,7 +175,7 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-//
+// StartKVServer
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -198,17 +205,19 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.stateMachine = make(map[string]string)
-	kv.opCachesById = make(map[int64]*OpCache)
+	kv.clients = make(map[int64]*OpCache)
 	go func() {
 		for !kv.killed() {
 			msg := <-kv.applyCh
 			kv.mu.Lock()
+			log.Printf("%v: Receive msg: %v.\n", kv.me, msg)
 			command := msg.Command.(Op)
-			opCache, present := kv.opCachesById[command.UniqueId]
+			opCache, present := kv.clients[command.ClientId]
 			if !present {
 				kv.mu.Unlock()
-				return
+				continue
 			}
+
 			result := ""
 
 			switch command.Type {
@@ -226,7 +235,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			// indicate that the msg (and any msg below it), will never be completed.
 			i := 0
 			for ; i < len(kv.opCachesList); i++ {
-				if kv.opCachesList[i].term > opCache.term || kv.opCachesList[i].term == opCache.term && kv.opCachesList[i].index > opCache.index {
+				if kv.opCachesList[i].term > opCache.term || kv.opCachesList[i].term == opCache.term && kv.opCachesList[i].index >= opCache.index {
 					break
 				}
 			}
@@ -235,6 +244,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			kv.mu.Unlock()
 
 			opCache.complete(result, OK)
+			log.Printf("%v: Discard %v Op because they will NOT completed in the future. Top: %v. Dicard: %v\n", me, len(failedOpCaches), opCache, failedOpCaches)
 			for _, failedOpCache := range failedOpCaches {
 				failedOpCache.completeIfUnfinished("", ErrWrongLeader)
 			}

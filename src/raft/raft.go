@@ -21,6 +21,7 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
@@ -257,7 +258,7 @@ type Log struct {
 }
 
 func (l Log) String() string {
-	return fmt.Sprintf("Log{cmd=%v, term=%v}", ToStringLimited(l.Command, 10), l.Team)
+	return fmt.Sprintf("Log{cmd=%v, term=%v}", ToStringLimited(l.Command, 100), l.Team)
 }
 
 // return currentTerm and whether this server
@@ -756,10 +757,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := false
 	// Your code here (2B).
-	rf.logger.Printf("%v: Start: %v\n", rf.me, ToStringLimited(command, 10))
+	//rf.logger.Printf("%v: Start: %v\n", rf.me, ToStringLimited(command, 50))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.logger.Printf("%v: Start: %v, GetState Success, rf=%v.\n", rf.me, ToStringLimited(command, 10), rf)
+	rf.logger.Printf("%v: Start: %v, GetState Success, rf=%v.\n", rf.me, ToStringLimited(command, 50), rf)
 	if rf.state != State_LEADER {
 		return index, term, isLeader
 	}
@@ -1172,7 +1173,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.logger = log.New(os.Stdout, "Raft", log.Lshortfile|log.Lmicroseconds)
 
-	//rf.logger.SetOutput(ioutil.Discard)
+	rf.logger.SetOutput(ioutil.Discard)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())

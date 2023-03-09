@@ -7,9 +7,9 @@ import (
 )
 
 const (
-	OK             = "OK"
-	WaitComplete   = "WaitComplete"
-	ErrNoKey       = "ErrNoKey"
+	OK           = "OK"
+	WaitComplete = "WaitComplete"
+	//ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
 )
 
@@ -24,12 +24,12 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	UniqueId   int64
-	PrevRecvId int64
+	ClientId  int64
+	CommandId int64
 }
 
 func (args PutAppendArgs) String() string {
-	return fmt.Sprintf("{key=%v, value=%v, op=%v, id=%v, prevId=%v}", args.Key, raft.ToStringLimited(args.Value, 10), args.Op, args.UniqueId, args.PrevRecvId)
+	return fmt.Sprintf("{key=%v, value=%v, op=%v, client_id=%v, command_id=%v}", args.Key, raft.ToStringLimited(args.Value, 10), args.Op, args.ClientId, args.CommandId)
 }
 
 type PutAppendReply struct {
@@ -44,12 +44,12 @@ type GetArgs struct {
 	Key string
 
 	// You'll have to add definitions here.
-	UniqueId   int64
-	PrevRecvId int64
+	ClientId  int64
+	CommandId int64
 }
 
 func (args GetArgs) String() string {
-	return fmt.Sprintf("{key=%v}", args.Key)
+	return fmt.Sprintf("{key=%v, client_id=%v, command_id=%v}", args.Key, args.ClientId, args.CommandId)
 }
 
 type GetReply struct {
@@ -62,31 +62,36 @@ func (reply GetReply) String() string {
 }
 
 type OpCache struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	opType   OpType
-	key      string
-	value    string
-	term     int
-	index    int
-	uniqueId int64
-	result   string
-	err      Err
+	mu        sync.Mutex
+	cond      *sync.Cond
+	clientId  int64
+	commandId int64
+	opType    OpType
+	key       string
+	value     string
+	term      int
+	index     int
+	result    string
+	err       Err
 }
 
 func (oc *OpCache) String() string {
-	return fmt.Sprintf("{opType=%v, key=%v, value=%v, term=%v, id=%v, result=%v, err=%v}", oc.opType, oc.key, oc.value, oc.term, oc.uniqueId, oc.result, oc.err)
+	if oc.mu.TryLock() {
+		defer oc.mu.Unlock()
+	}
+	return fmt.Sprintf("{clientId=%v, cmdId=%v, opType=%v, key=%v, value=%v, term=%v, index=%v, result=%v, err=%v}", oc.clientId, oc.commandId, oc.opType, oc.key, oc.value, oc.term, oc.index, oc.result, oc.err)
 }
 
-func NewOpCache(opType OpType, key string, value string, term int, index int, uniqueId int64) *OpCache {
+func NewOpCache(clientId int64, commandId int64, opType OpType, key string, value string, term int, index int) *OpCache {
 	oc := OpCache{}
 	oc.cond = sync.NewCond(&oc.mu)
+	oc.clientId = clientId
+	oc.commandId = commandId
 	oc.opType = opType
 	oc.key = key
 	oc.value = value
 	oc.term = term
 	oc.index = index
-	oc.uniqueId = uniqueId
 	oc.err = WaitComplete
 	return &oc
 }
