@@ -21,7 +21,6 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
@@ -248,7 +247,7 @@ func (rf *Raft) String() string {
 	return fmt.Sprintf("{me=%v, state=%v, electionTimer=%v, currentTerm=%v, voteFor=%v, commitIndex=%v, "+
 		"lastApply=%v, nextIndex=%v, matchIndex=%v, log=%v}",
 		rf.me, rf.state, rf.electionTimer, rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastApplied,
-		rf.nextIndex, rf.matchIndex, rf.log)
+		rf.nextIndex, rf.matchIndex, ToStringLimited(rf.log, 100))
 }
 
 // struct for log entry
@@ -1173,7 +1172,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.logger = log.New(os.Stdout, "Raft", log.Lshortfile|log.Lmicroseconds)
 
-	rf.logger.SetOutput(ioutil.Discard)
+	//rf.logger.SetOutput(ioutil.Discard)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())

@@ -99,14 +99,16 @@ func (oc *OpCache) complete(result string, err Err) {
 	oc.cond.Broadcast()
 }
 
-func (oc *OpCache) completeIfUnfinished(result string, err Err) {
+func (oc *OpCache) completeIfUnfinished(result string, err Err) bool {
 	oc.mu.Lock()
 	defer oc.mu.Unlock()
 	if oc.err == WaitComplete {
 		oc.result = result
 		oc.err = err
 		oc.cond.Broadcast()
+		return true
 	}
+	return false
 }
 
 func (oc *OpCache) get() (string, Err) {

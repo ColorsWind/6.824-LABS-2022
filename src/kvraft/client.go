@@ -48,28 +48,31 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	args := GetArgs{key, nrand(), ck.lastOpId}
-	ck.lastOpId = args.UniqueId
 	for {
 		reply := GetReply{}
 		log.Printf("c -> %v: Call Get. args=%v.\n", ck.lastKnownLeader, args)
 		ok := ck.servers[ck.lastKnownLeader].Call("KVServer.Get", &args, &reply)
 		if !ok {
 			log.Printf("c -> %v: Fail to call GET.\n", ck.lastKnownLeader)
+			// server may be down, retry another
+			time.Sleep(100 * time.Millisecond)
+			args.UniqueId = nrand()
 			continue
 		}
 		switch reply.Err {
 		case OK, ErrNoKey:
 			log.Printf("c -> %v: Successfully finished Get, reply=%v.\n", ck.lastKnownLeader, reply)
-			ck.lastOpId = args.UniqueId
 			return reply.Value
 		case ErrWrongLeader:
 			ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 			fallthrough
 		default:
 			log.Printf("c -> %v: Call GET, return error=%v.\n", ck.lastKnownLeader, reply.Err)
+			args.UniqueId = nrand()
 			time.Sleep(100 * time.Millisecond)
-			continue
 		}
+		args.PrevRecvId = args.UniqueId
+		args.UniqueId = nrand()
 	}
 }
 
@@ -92,6 +95,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ok := ck.servers[ck.lastKnownLeader].Call("KVServer.PutAppend", &args, &reply)
 		if !ok {
 			log.Printf("c -> %v: Fail to call PutAppend.\n", ck.lastKnownLeader)
+			ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		switch reply.Err {
@@ -104,8 +109,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		default:
 			log.Printf("c -> %v: Call PUT_APPEND, return error=%v.\n", ck.lastKnownLeader, reply.Err)
 			time.Sleep(100 * time.Millisecond)
-			continue
 		}
+
+		args.PrevRecvId = args.UniqueId
+		args.UniqueId = nrand()
 	}
 }
 
