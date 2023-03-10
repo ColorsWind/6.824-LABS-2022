@@ -3,6 +3,7 @@ package kvraft
 import (
 	"6.824/raft"
 	"fmt"
+	"log"
 	"sync"
 )
 
@@ -11,6 +12,7 @@ const (
 	WaitComplete = "WaitComplete"
 	//ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrOutdatedRPC = "ErrOutdatedRPC"
 )
 
 type Err string
@@ -66,6 +68,7 @@ type OpCache struct {
 	cond      *sync.Cond
 	clientId  int64
 	commandId int64
+	appliedId int64
 	opType    OpType
 	key       string
 	value     string
@@ -79,11 +82,14 @@ func (oc *OpCache) String() string {
 	if oc.mu.TryLock() {
 		defer oc.mu.Unlock()
 	}
-	return fmt.Sprintf("{clientId=%v, cmdId=%v, opType=%v, key=%v, value=%v, term=%v, index=%v, result=%v, err=%v}", oc.clientId, oc.commandId, oc.opType, oc.key, oc.value, oc.term, oc.index, oc.result, oc.err)
+	s := fmt.Sprintf("{clientId=%v, cmdId=%v, opType=%v, key=%v, value=%v, term=%v, index=%v, result=%v, err=%v}", oc.clientId, oc.commandId, oc.opType, oc.key, oc.value, oc.term, oc.index, oc.result, oc.err)
+	return raft.ToStringLimited(s, 200)
 }
 
 func NewOpCache(clientId int64, commandId int64, opType OpType, key string, value string, term int, index int) *OpCache {
 	oc := OpCache{}
+	oc.mu.Lock()
+	defer oc.mu.Unlock()
 	oc.cond = sync.NewCond(&oc.mu)
 	oc.clientId = clientId
 	oc.commandId = commandId
@@ -93,15 +99,33 @@ func NewOpCache(clientId int64, commandId int64, opType OpType, key string, valu
 	oc.term = term
 	oc.index = index
 	oc.err = WaitComplete
+	oc.appliedId = 0
 	return &oc
 }
 
 func (oc *OpCache) complete(result string, err Err) {
 	oc.mu.Lock()
 	defer oc.mu.Unlock()
+	if oc.err != WaitComplete {
+		log.Panicf("already finished: %v.", oc)
+	}
 	oc.result = result
 	oc.err = err
 	oc.cond.Broadcast()
+}
+
+func (oc *OpCache) ensureFinished() {
+	oc.mu.Lock()
+	defer oc.mu.Unlock()
+	if oc.err == WaitComplete {
+		log.Panicf("not finished: %v.", oc)
+	}
+}
+
+func (oc *OpCache) finished() bool {
+	oc.mu.Lock()
+	defer oc.mu.Unlock()
+	return oc.err != WaitComplete
 }
 
 func (oc *OpCache) completeIfUnfinished(result string, err Err) bool {

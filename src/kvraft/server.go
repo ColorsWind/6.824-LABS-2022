@@ -56,16 +56,27 @@ type KVServer struct {
 	stateMachine map[string]string
 	opCachesList []*OpCache
 	clients      map[int64]*OpCache
+	lastApplied  map[int64]int64
 }
 
 func (kv *KVServer) createOpCacheWithLock(op Op, term int, index int) *OpCache {
 	opCache := NewOpCache(op.ClientId, op.CommandId, op.Type, op.Key, op.Value, term, index)
 	kv.clients[opCache.clientId] = opCache
-	kv.opCachesList = append(kv.opCachesList, opCache)
+	//kv.opCachesList = append(kv.opCachesList, opCache)
 	go func() {
-		time.Sleep(250 * time.Millisecond)
-		if opCache.completeIfUnfinished("", ErrWrongLeader) {
-			log.Printf("%v: %v timeout.\n", kv.me, opCache)
+		for !opCache.finished() {
+			time.Sleep(250 * time.Millisecond)
+			currentTerm, isLeader := kv.rf.GetState()
+			kv.mu.Lock()
+			//log.Printf("%v: wait, opCache=%v, currentTerm=%v, isLeader=%v, lastApplied=%v, rf=%v\n", kv.me, opCache, currentTerm, isLeader, kv.lastApplied[opCache.clientId], kv.rf)
+			kv.mu.Unlock()
+			if !isLeader || opCache.term != currentTerm {
+				if opCache.completeIfUnfinished("", ErrWrongLeader) {
+					log.Printf("%v: %v timeout.\n", kv.me, opCache)
+				}
+				return
+
+			}
 		}
 
 	}()
@@ -77,7 +88,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	opCache, present := kv.clients[args.ClientId]
-	if !present || args.CommandId == opCache.commandId+1 {
+	if !present || args.CommandId > opCache.commandId {
 		// new command
 		op := Op{args.ClientId, args.CommandId, OpType_GET, args.Key, ""}
 		index, currentTerm, isLeader := kv.rf.Start(op)
@@ -105,7 +116,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			delete(kv.clients, args.ClientId)
 		}
 	} else {
-		log.Panicf("kvserver %v receive invalid id. args=%v, opCache=%v.", kv.me, args, opCache)
+		log.Panicf("kvserver %v receive invalid id (opCache.id=%v). args=%v, opCache=%v.", kv.me, args, opCache.commandId, opCache)
 	}
 }
 
@@ -124,7 +135,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		log.Panicf("Op is not Put or Append: %v.", args)
 	}
 
-	if !present || args.CommandId == opCache.commandId+1 {
+	if !present || args.CommandId > opCache.commandId {
 		// new command
 		op := Op{args.ClientId, args.CommandId, opType, args.Key, args.Value}
 		index, currentTerm, isLeader := kv.rf.Start(op)
@@ -152,6 +163,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	} else {
 		log.Panicf("kvserver %v receive invalid id. args=%v, opCache=%v.", kv.me, args, opCache)
 	}
+
 }
 
 //
@@ -206,89 +218,59 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.stateMachine = make(map[string]string)
 	kv.clients = make(map[int64]*OpCache)
+	kv.lastApplied = make(map[int64]int64)
 	go func() {
 		for !kv.killed() {
 			msg := <-kv.applyCh
 			kv.mu.Lock()
 			log.Printf("%v: Receive msg: %v.\n", kv.me, msg)
 			command := msg.Command.(Op)
-			opCache, present := kv.clients[command.ClientId]
-			if !present {
-				kv.mu.Unlock()
-				continue
-			}
 
+			// update state machine
 			result := ""
-
-			switch command.Type {
-			case OpType_GET:
-				result = kv.stateMachine[command.Key]
-			case OpType_PUT:
-				kv.stateMachine[command.Key] = command.Value
-			case OpType_APPEND:
-				kv.stateMachine[command.Key] = kv.stateMachine[command.Key] + command.Value
-			default:
-				log.Panicf("Could not identify OpType: %v.", command.Type)
+			lastApplied := kv.lastApplied[command.ClientId]
+			if command.CommandId != lastApplied && command.CommandId != lastApplied+1 {
+				log.Panicf("%v receive msg with invalid command id. msg=%v, lastApplied=%v.", me, msg, lastApplied)
 			}
-			//log.Printf("!!!%v, %v, %v\n", result, opCache.opType, kv.stateMachine)
-			// a msg's term smaller than the current applied ones, or equal term but smaller index,
-			// indicate that the msg (and any msg below it), will never be completed.
-			i := 0
-			for ; i < len(kv.opCachesList); i++ {
-				if kv.opCachesList[i].term > opCache.term || kv.opCachesList[i].term == opCache.term && kv.opCachesList[i].index >= opCache.index {
-					break
+			if command.CommandId == lastApplied+1 {
+				switch command.Type {
+				case OpType_GET:
+					result = kv.stateMachine[command.Key]
+				case OpType_PUT:
+					kv.stateMachine[command.Key] = command.Value
+				case OpType_APPEND:
+					kv.stateMachine[command.Key] = kv.stateMachine[command.Key] + command.Value
+				default:
+					log.Panicf("Could not identify OpType: %v.", command.Type)
+				}
+			} else {
+				switch command.Type {
+				case OpType_GET:
+					result = kv.stateMachine[command.Key]
+				case OpType_APPEND, OpType_PUT:
+					// ignore
+				default:
+					log.Panicf("Could not identify OpType: %v.", command.Type)
 				}
 			}
-			failedOpCaches := kv.opCachesList[:i]
-			kv.opCachesList = kv.opCachesList[i:]
+			kv.lastApplied[command.ClientId] = command.CommandId
+
+			opCache, present := kv.clients[command.ClientId]
+			if !present || command.CommandId > opCache.commandId {
+				// new command
+				if present {
+					opCache.ensureFinished()
+				}
+				opCache = kv.createOpCacheWithLock(command, -1, -1)
+				opCache.complete(result, OK)
+			} else if opCache.commandId == command.CommandId {
+				opCache.completeIfUnfinished(result, OK)
+			} else {
+				log.Printf("%v: receive outdated msg, just update state but not change opCache. msg=%v, opCache=%v.", kv.me, msg, opCache)
+			}
+
 			kv.mu.Unlock()
 
-			opCache.complete(result, OK)
-			log.Printf("%v: Discard %v Op because they will NOT completed in the future. Top: %v. Dicard: %v\n", me, len(failedOpCaches), opCache, failedOpCaches)
-			for _, failedOpCache := range failedOpCaches {
-				failedOpCache.completeIfUnfinished("", ErrWrongLeader)
-			}
-			//select {
-			//case msg := <-kv.applyCh:
-			//	kv.mu.Lock()
-			//	command := msg.Command.(Op)
-			//	opCache, present := kv.opCachesById[command.UniqueId]
-			//	if !present {
-			//		kv.mu.Unlock()
-			//		return
-			//	}
-			//	result := ""
-			//
-			//	switch command.Type {
-			//	case OpType_GET:
-			//		result = kv.stateMachine[command.Key]
-			//	case OpType_PUT:
-			//		kv.stateMachine[command.Key] = command.Value
-			//	case OpType_APPEND:
-			//		kv.stateMachine[command.Key] = kv.stateMachine[command.Key] + command.Value
-			//	default:
-			//		log.Panicf("Could not identify OpType: %v.", command.Type)
-			//	}
-			//	//log.Printf("!!!%v, %v, %v\n", result, opCache.opType, kv.stateMachine)
-			//	// a msg's term smaller than the current applied ones, or equal term but smaller index,
-			//	// indicate that the msg (and any msg below it), will never be completed.
-			//	i := 0
-			//	for ; i < len(kv.opCachesList); i++ {
-			//		if kv.opCachesList[i].term > opCache.term || kv.opCachesList[i].term == opCache.term && kv.opCachesList[i].index > opCache.index {
-			//			break
-			//		}
-			//	}
-			//	failedOpCaches := kv.opCachesList[:i]
-			//	kv.opCachesList = kv.opCachesList[i:]
-			//	kv.mu.Unlock()
-			//
-			//	opCache.complete(result, OK)
-			//	for _, failedOpCache := range failedOpCaches {
-			//		failedOpCache.completeIfUnfinished("", ErrWrongLeader)
-			//	}
-			//default:
-			//	time.Sleep(50 * time.Millisecond)
-			//}
 		}
 	}()
 	return kv
