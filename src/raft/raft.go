@@ -603,8 +603,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 // call this function WITHOUT lock
 func (rf *Raft) onApplyStateMachine() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	for !rf.killed() {
-		rf.mu.Lock()
 		rf.applyCond.Wait()
 		for rf.commitIndex > rf.lastApplied {
 			index := rf.lastApplied + 1
@@ -642,7 +643,6 @@ func (rf *Raft) onApplyStateMachine() {
 				rf.lastApplied = rf.log.SnapshotLastIncludedIndex
 			}
 		}
-		rf.mu.Unlock()
 	}
 }
 
