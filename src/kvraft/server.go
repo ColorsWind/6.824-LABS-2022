@@ -41,6 +41,11 @@ type Op struct {
 	Value     string
 }
 
+type ExecutedOp struct {
+	Op
+	result string
+}
+
 func (op Op) String() string {
 	return fmt.Sprintf("client_id=%v, cmd_id=%v, type=%v, Key=%v, Value=%v", op.ClientId, op.CommandId, op.Type, op.Key, op.Value)
 }
@@ -55,16 +60,17 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvMap            map[string]string
-	opCacheMap       map[int64]*OpCache
-	lastAppliedMap   map[int64]int64
+	kvMap                 map[string]string
+	clientsRequest        map[int64]*OpCache
+	lastAppliedCommandMap map[int64]ExecutedOp
+	//lastAppliedMap     map[int64]int64
 	lastAppliedIndex int
 	logger           *log.Logger
 }
 
 func (kv *KVServer) createOpCacheWithLock(op Op, term int, index int) *OpCache {
 	opCache := NewOpCache(op.ClientId, op.CommandId, op.Type, op.Key, op.Value, term, index)
-	kv.opCacheMap[opCache.clientId] = opCache
+	kv.clientsRequest[opCache.clientId] = opCache
 	//kv.opCachesList = append(kv.opCachesList, opCache)
 	go func() {
 		for !opCache.finished() {
@@ -90,7 +96,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	opCache, present := kv.opCacheMap[args.ClientId]
+	opCache, present := kv.clientsRequest[args.ClientId]
 	if !present || args.CommandId > opCache.CommandId {
 		// new command
 		op := Op{args.ClientId, args.CommandId, OpType_GET, args.Key, ""}
@@ -103,7 +109,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = err
 			kv.mu.Lock()
 			if err != OK {
-				delete(kv.opCacheMap, args.ClientId)
+				delete(kv.clientsRequest, args.ClientId)
 			}
 		} else {
 			reply.Err = ErrWrongLeader
@@ -116,7 +122,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = err
 		kv.mu.Lock()
 		if err != OK {
-			delete(kv.opCacheMap, args.ClientId)
+			delete(kv.clientsRequest, args.ClientId)
 		}
 	} else {
 		kv.logger.Panicf("kvserver %v receive invalid id (opCache.id=%v). args=%v, opCache=%v.", kv.me, args, opCache.CommandId, opCache)
@@ -127,7 +133,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	opCache, present := kv.opCacheMap[args.ClientId]
+	opCache, present := kv.clientsRequest[args.ClientId]
 
 	var opType OpType
 	if args.Op == "Put" {
@@ -149,7 +155,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = err
 			kv.mu.Lock()
 			if err != OK {
-				delete(kv.opCacheMap, args.ClientId)
+				delete(kv.clientsRequest, args.ClientId)
 			}
 		} else {
 			reply.Err = ErrWrongLeader
@@ -161,7 +167,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = err
 		kv.mu.Lock()
 		if err != OK {
-			delete(kv.opCacheMap, args.ClientId)
+			delete(kv.clientsRequest, args.ClientId)
 		}
 	} else {
 		kv.logger.Panicf("kvserver %v receive invalid id. args=%v, opCache=%v.", kv.me, args, opCache)
@@ -190,37 +196,27 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-func (kv *KVServer) encodeState(kvMap map[string]string, opCacheMap map[int64]*OpCache, lastAppliedMap map[int64]int64) []byte {
+func (kv *KVServer) encodeState(kvMap map[string]string, lastAppliedCommand map[int64]ExecutedOp) []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if err := e.Encode(kvMap); err != nil {
 		kv.logger.Panicf("%v fail to encode kvmap: %v.", kv.me, kvMap)
 	}
-	if err := e.Encode(opCacheMap); err != nil {
-		kv.logger.Panicf("%v fail to encode opCacheMap: %v.", kv.me, opCacheMap)
-	}
-	if err := e.Encode(lastAppliedMap); err != nil {
-		kv.logger.Panicf("%v fail to encode lastAppliedMap: %v.", kv.me, lastAppliedMap)
+	if err := e.Encode(lastAppliedCommand); err != nil {
+		kv.logger.Panicf("%v fail to encode lastAppliedCommand: %v.", kv.me, lastAppliedCommand)
 	}
 	return w.Bytes()
 }
 
-func (kv *KVServer) decodeState(data []byte) (kvMap map[string]string, opCacheMap map[int64]*OpCache, lastAppliedMap map[int64]int64) {
+func (kv *KVServer) decodeState(data []byte) (kvMap map[string]string, lastAppliedCommand map[int64]ExecutedOp) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	if err := d.Decode(&kvMap); err != nil {
 		kv.logger.Panicf("%v fail to decode kvmap.", kv.me)
 	}
 
-	if err := d.Decode(&opCacheMap); err != nil {
-		kv.logger.Panicf("%v fail to decode opCacheMap.", kv.me)
-	}
-	for _, opCache := range opCacheMap {
-		opCache.cond = sync.NewCond(&opCache.mu)
-	}
-
-	if err := d.Decode(&lastAppliedMap); err != nil {
-		kv.logger.Panicf("%v fail to decode lastAppliedMap.", kv.me)
+	if err := d.Decode(&lastAppliedCommand); err != nil {
+		kv.logger.Panicf("%v fail to decode lastAppliedCommandMap.", kv.me)
 	}
 	return
 }
@@ -257,8 +253,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.kvMap = make(map[string]string)
-	kv.opCacheMap = make(map[int64]*OpCache)
-	kv.lastAppliedMap = make(map[int64]int64)
+	kv.clientsRequest = make(map[int64]*OpCache)
+	kv.lastAppliedCommandMap = make(map[int64]ExecutedOp)
 	kv.lastAppliedIndex = 0
 	go func() {
 		for !kv.killed() {
@@ -268,15 +264,20 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			if msg.SnapshotValid {
 				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.CommandIndex, msg.Snapshot) {
 					// receive snapshot indicate is not leader
-					for _, opCache := range kv.opCacheMap {
-						opCache.completeIfUnfinished("", ErrApplySnapshot)
-					}
-					kvMap, opCacheMap, lastAppliedMap := kv.decodeState(msg.Snapshot)
-					kv.lastAppliedMap = lastAppliedMap
-					kv.opCacheMap = opCacheMap
+					kvMap, lastAppliedCommand := kv.decodeState(msg.Snapshot)
+					kv.lastAppliedCommandMap = lastAppliedCommand
 					kv.kvMap = kvMap
 					kv.lastAppliedIndex = msg.SnapshotIndex
-					kv.logger.Printf("%v\n", kvMap)
+					for clientId, opCache := range kv.clientsRequest {
+						command, present := kv.lastAppliedCommandMap[clientId]
+						if present {
+							if opCache.CommandId == command.CommandId {
+								opCache.completeIfUnfinished(command.result, OK)
+							} else if opCache.CommandId < command.CommandId && !opCache.finished() {
+								kv.logger.Panicf("%v receive invalid command id when applying snapshot. opCache=%v, command=%v.", kv.me, opCache, command)
+							}
+						}
+					}
 				}
 			}
 			if msg.CommandValid {
@@ -284,11 +285,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 				// update state machine
 				result := ""
-				lastApplied := kv.lastAppliedMap[command.ClientId]
-				if command.CommandId != lastApplied && command.CommandId != lastApplied+1 {
-					kv.logger.Panicf("%v receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", me, msg, lastApplied)
+				lastAppliedCommand := kv.lastAppliedCommandMap[command.ClientId]
+				if command.CommandId != lastAppliedCommand.CommandId && command.CommandId != lastAppliedCommand.CommandId+1 {
+					kv.logger.Panicf("%v receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", me, msg, lastAppliedCommand.CommandId)
 				}
-				if command.CommandId == lastApplied+1 {
+				if command.CommandId == lastAppliedCommand.CommandId+1 {
 					switch command.Type {
 					case OpType_GET:
 						result = kv.kvMap[command.Key]
@@ -309,9 +310,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 						kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
 					}
 				}
-				kv.lastAppliedMap[command.ClientId] = command.CommandId
+				kv.lastAppliedCommandMap[command.ClientId] = ExecutedOp{command, result}
 
-				opCache, present := kv.opCacheMap[command.ClientId]
+				opCache, present := kv.clientsRequest[command.ClientId]
 				if !present || command.CommandId > opCache.CommandId {
 					// new command
 					if present {
@@ -326,9 +327,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				}
 				kv.lastAppliedIndex = msg.CommandIndex
 			}
-			if maxraftstate > 0 && persister.RaftStateSize() > maxraftstate*8/10 {
-				kv.logger.Printf("%v: raft state size greater maxraftstate(%v > 0.8 * %v), trim log.\n", kv.me, persister.RaftStateSize(), maxraftstate)
-				snapshot := kv.encodeState(kv.kvMap, kv.opCacheMap, kv.lastAppliedMap)
+			if maxraftstate > 0 && persister.RaftStateSize() > maxraftstate {
+				kv.logger.Printf("%v: raft state size greater maxraftstate(%v > %v), trim log.\n", kv.me, persister.RaftStateSize(), maxraftstate)
+				snapshot := kv.encodeState(kv.kvMap, kv.lastAppliedCommandMap)
 				kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
 			}
 			kv.mu.Unlock()

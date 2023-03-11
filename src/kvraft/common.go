@@ -109,7 +109,7 @@ func ReadOpCacheFromByte(decoder *labgob.LabDecoder, me int) map[int64]*OpCache 
 	var opCacheMap map[int64]*OpCache
 	err := decoder.Decode(&opCacheMap)
 	if err != nil {
-		log.Panicf("%v fail to decode opCacheMap.", me)
+		log.Panicf("%v fail to decode clientsRequest.", me)
 	}
 	for _, opCache := range opCacheMap {
 		opCache.cond = sync.NewCond(&opCache.mu)
