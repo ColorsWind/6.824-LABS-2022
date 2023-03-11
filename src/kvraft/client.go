@@ -3,6 +3,7 @@ package kvraft
 import (
 	"6.824/labrpc"
 	"log"
+	"os"
 	"time"
 )
 import "crypto/rand"
@@ -13,8 +14,9 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	lastKnownLeader int
-	clientId        int64 // should be unique globally
+	clientId        int64 // random id, should be unique globally
 	commandId       int64 // for a client, monotonically increase from 0
+	logger          *log.Logger
 }
 
 func nrand() int64 {
@@ -30,8 +32,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 	ck.clientId = nrand()
 	ck.commandId = 0
-	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
-	//log.SetOutput(ioutil.Discard)
+	ck.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
+	//ck.logger.SetOutput(ioutil.Discard)
 	// You'll have to add code here.
 	return ck
 }
@@ -54,18 +56,18 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{key, ck.clientId, ck.commandId}
 	for {
 		reply := GetReply{}
-		log.Printf("c -> %v: Call Get. args=%v.\n", ck.lastKnownLeader, args)
+		ck.logger.Printf("c -> %v: Call Get. args=%v.\n", ck.lastKnownLeader, args)
 		ok := ck.servers[ck.lastKnownLeader].Call("KVServer.Get", &args, &reply)
 		if ok {
 			switch reply.Err {
 			case OK:
-				log.Printf("c -> %v: Successfully finished Get, args=%v, reply=%v.\n", ck.lastKnownLeader, args, reply)
+				ck.logger.Printf("c -> %v: Successfully finished Get, args=%v, reply=%v.\n", ck.lastKnownLeader, args, reply)
 				return reply.Value
 			default:
-				log.Printf("c -> %v: Call GET, return error=%v.\n", ck.lastKnownLeader, reply.Err)
+				ck.logger.Printf("c -> %v: Call GET, return error=%v.\n", ck.lastKnownLeader, reply.Err)
 			}
 		} else {
-			log.Printf("c -> %v: Fail to call GET. args=%v.\n", ck.lastKnownLeader, args)
+			ck.logger.Printf("c -> %v: Fail to call GET. args=%v.\n", ck.lastKnownLeader, args)
 		}
 		ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 		time.Sleep(10 * time.Millisecond)
@@ -87,18 +89,18 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{key, value, op, ck.clientId, ck.commandId}
 	for {
 		reply := PutAppendReply{}
-		log.Printf("c -> %v: Call PutAppend. args=%v.\n", ck.lastKnownLeader, args)
+		ck.logger.Printf("c -> %v: Call PutAppend. args=%v.\n", ck.lastKnownLeader, args)
 		ok := ck.servers[ck.lastKnownLeader].Call("KVServer.PutAppend", &args, &reply)
 		if ok {
 			switch reply.Err {
 			case OK:
-				log.Printf("c -> %v: Successfully finished PutAppend, args=%v, reply=%v.\n", ck.lastKnownLeader, args, reply)
+				ck.logger.Printf("c -> %v: Successfully finished PutAppend, args=%v, reply=%v.\n", ck.lastKnownLeader, args, reply)
 				return
 			default:
-				log.Printf("c -> %v: Call PUT_APPEND, return error=%v.\n", ck.lastKnownLeader, reply.Err)
+				ck.logger.Printf("c -> %v: Call PUT_APPEND, return error=%v.\n", ck.lastKnownLeader, reply.Err)
 			}
 		} else {
-			log.Printf("c -> %v: Fail to call PutAppend. args=%v.\n", ck.lastKnownLeader, args)
+			ck.logger.Printf("c -> %v: Fail to call PutAppend. args=%v.\n", ck.lastKnownLeader, args)
 		}
 		ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 		time.Sleep(10 * time.Millisecond)

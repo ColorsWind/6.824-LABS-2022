@@ -1175,7 +1175,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		SnapshotLastIncludedTerm:  -1,
 	}
 	rf.applyCond = sync.NewCond(&rf.mu)
-	rf.logger = log.New(os.Stdout, "Raft", log.Lshortfile|log.Lmicroseconds)
+	rf.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
 
 	rf.logger.SetOutput(ioutil.Discard)
 

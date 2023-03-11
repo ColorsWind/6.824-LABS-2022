@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,11 +55,11 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	stateMachine     map[string]string
-	opCachesList     []*OpCache
+	kvMap            map[string]string
 	opCacheMap       map[int64]*OpCache
 	lastAppliedMap   map[int64]int64
 	lastAppliedIndex int
+	logger           *log.Logger
 }
 
 func (kv *KVServer) createOpCacheWithLock(op Op, term int, index int) *OpCache {
@@ -70,11 +71,11 @@ func (kv *KVServer) createOpCacheWithLock(op Op, term int, index int) *OpCache {
 			time.Sleep(250 * time.Millisecond)
 			currentTerm, isLeader := kv.rf.GetState()
 			kv.mu.Lock()
-			//log.Printf("%v: wait, opCache=%v, currentTerm=%v, isLeader=%v, lastAppliedMap=%v, rf=%v\n", kv.me, opCache, currentTerm, isLeader, kv.lastAppliedMap[opCache.clientId], kv.rf)
+			//kv.logger.Printf("%v: wait, opCache=%v, currentTerm=%v, isLeader=%v, lastAppliedMap=%v, rf=%v\n", kv.me, opCache, currentTerm, isLeader, kv.lastAppliedMap[opCache.clientId], kv.rf)
 			kv.mu.Unlock()
 			if !isLeader || opCache.term != currentTerm {
 				if opCache.completeIfUnfinished("", ErrWrongLeader) {
-					log.Printf("%v: %v timeout.\n", kv.me, opCache)
+					kv.logger.Printf("%v: %v timeout.\n", kv.me, opCache)
 				}
 				return
 
@@ -118,7 +119,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			delete(kv.opCacheMap, args.ClientId)
 		}
 	} else {
-		log.Panicf("kvserver %v receive invalid id (opCache.id=%v). args=%v, opCache=%v.", kv.me, args, opCache.CommandId, opCache)
+		kv.logger.Panicf("kvserver %v receive invalid id (opCache.id=%v). args=%v, opCache=%v.", kv.me, args, opCache.CommandId, opCache)
 	}
 }
 
@@ -134,7 +135,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	} else if args.Op == "Append" {
 		opType = OpType_APPEND
 	} else {
-		log.Panicf("Op is not Put or Append: %v.", args)
+		kv.logger.Panicf("Op is not Put or Append: %v.", args)
 	}
 
 	if !present || args.CommandId > opCache.CommandId {
@@ -163,7 +164,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			delete(kv.opCacheMap, args.ClientId)
 		}
 	} else {
-		log.Panicf("kvserver %v receive invalid id. args=%v, opCache=%v.", kv.me, args, opCache)
+		kv.logger.Panicf("kvserver %v receive invalid id. args=%v, opCache=%v.", kv.me, args, opCache)
 	}
 
 }
@@ -193,13 +194,13 @@ func (kv *KVServer) encodeState(kvMap map[string]string, opCacheMap map[int64]*O
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if err := e.Encode(kvMap); err != nil {
-		log.Panicf("%v fail to encode kvmap: %v.", kv.me, kvMap)
+		kv.logger.Panicf("%v fail to encode kvmap: %v.", kv.me, kvMap)
 	}
 	if err := e.Encode(opCacheMap); err != nil {
-		log.Panicf("%v fail to encode opCacheMap: %v.", kv.me, opCacheMap)
+		kv.logger.Panicf("%v fail to encode opCacheMap: %v.", kv.me, opCacheMap)
 	}
 	if err := e.Encode(lastAppliedMap); err != nil {
-		log.Panicf("%v fail to encode lastAppliedMap: %v.", kv.me, lastAppliedMap)
+		kv.logger.Panicf("%v fail to encode lastAppliedMap: %v.", kv.me, lastAppliedMap)
 	}
 	return w.Bytes()
 }
@@ -208,18 +209,18 @@ func (kv *KVServer) decodeState(data []byte) (kvMap map[string]string, opCacheMa
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	if err := d.Decode(&kvMap); err != nil {
-		log.Panicf("%v fail to decode kvmap.", kv.me)
+		kv.logger.Panicf("%v fail to decode kvmap.", kv.me)
 	}
 
 	if err := d.Decode(&opCacheMap); err != nil {
-		log.Panicf("%v fail to decode opCacheMap.", kv.me)
+		kv.logger.Panicf("%v fail to decode opCacheMap.", kv.me)
 	}
 	for _, opCache := range opCacheMap {
 		opCache.cond = sync.NewCond(&opCache.mu)
 	}
 
 	if err := d.Decode(&lastAppliedMap); err != nil {
-		log.Panicf("%v fail to decode lastAppliedMap.", kv.me)
+		kv.logger.Panicf("%v fail to decode lastAppliedMap.", kv.me)
 	}
 	return
 }
@@ -251,16 +252,19 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
+	//kv.logger.SetOutput(ioutil.Discard)
 
 	// You may need initialization code here.
-	kv.stateMachine = make(map[string]string)
+	kv.kvMap = make(map[string]string)
 	kv.opCacheMap = make(map[int64]*OpCache)
 	kv.lastAppliedMap = make(map[int64]int64)
+	kv.lastAppliedIndex = 0
 	go func() {
 		for !kv.killed() {
 			msg := <-kv.applyCh
 			kv.mu.Lock()
-			log.Printf("%v: Receive msg: %v.\n", kv.me, msg)
+			kv.logger.Printf("%v: Receive msg: %v.\n", kv.me, msg)
 			if msg.SnapshotValid {
 				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.CommandIndex, msg.Snapshot) {
 					// receive snapshot indicate is not leader
@@ -270,9 +274,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 					kvMap, opCacheMap, lastAppliedMap := kv.decodeState(msg.Snapshot)
 					kv.lastAppliedMap = lastAppliedMap
 					kv.opCacheMap = opCacheMap
-					kv.stateMachine = kvMap
+					kv.kvMap = kvMap
 					kv.lastAppliedIndex = msg.SnapshotIndex
-					log.Printf("%v\n", kvMap)
+					kv.logger.Printf("%v\n", kvMap)
 				}
 			}
 			if msg.CommandValid {
@@ -282,27 +286,27 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				result := ""
 				lastApplied := kv.lastAppliedMap[command.ClientId]
 				if command.CommandId != lastApplied && command.CommandId != lastApplied+1 {
-					log.Panicf("%v receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", me, msg, lastApplied)
+					kv.logger.Panicf("%v receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", me, msg, lastApplied)
 				}
 				if command.CommandId == lastApplied+1 {
 					switch command.Type {
 					case OpType_GET:
-						result = kv.stateMachine[command.Key]
+						result = kv.kvMap[command.Key]
 					case OpType_PUT:
-						kv.stateMachine[command.Key] = command.Value
+						kv.kvMap[command.Key] = command.Value
 					case OpType_APPEND:
-						kv.stateMachine[command.Key] = kv.stateMachine[command.Key] + command.Value
+						kv.kvMap[command.Key] = kv.kvMap[command.Key] + command.Value
 					default:
-						log.Panicf("Could not identify OpType: %v.", command.Type)
+						kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
 					}
 				} else {
 					switch command.Type {
 					case OpType_GET:
-						result = kv.stateMachine[command.Key]
+						result = kv.kvMap[command.Key]
 					case OpType_APPEND, OpType_PUT:
 						// ignore
 					default:
-						log.Panicf("Could not identify OpType: %v.", command.Type)
+						kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
 					}
 				}
 				kv.lastAppliedMap[command.ClientId] = command.CommandId
@@ -318,12 +322,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				} else if opCache.CommandId == command.CommandId {
 					opCache.completeIfUnfinished(result, OK)
 				} else {
-					log.Printf("%v: receive outdated msg, just update state but not change opCache. msg=%v, opCache=%v.", kv.me, msg, opCache)
+					kv.logger.Printf("%v: receive outdated msg, just update state but not change opCache. msg=%v, opCache=%v.", kv.me, msg, opCache)
 				}
 				kv.lastAppliedIndex = msg.CommandIndex
 			}
-			if maxraftstate > 0 && persister.RaftStateSize()*8/10 > maxraftstate {
-				snapshot := kv.encodeState(kv.stateMachine, kv.opCacheMap, kv.lastAppliedMap)
+			if maxraftstate > 0 && persister.RaftStateSize() > maxraftstate*8/10 {
+				kv.logger.Printf("%v: raft state size greater maxraftstate(%v > 0.8 * %v), trim log.\n", kv.me, persister.RaftStateSize(), maxraftstate)
+				snapshot := kv.encodeState(kv.kvMap, kv.opCacheMap, kv.lastAppliedMap)
 				kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
 			}
 			kv.mu.Unlock()
