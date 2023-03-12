@@ -864,7 +864,7 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 		if !reply.Success {
 			var nextIndex int
 			if reply.XTerm >= 0 {
-				xindex1 := rf.log.searchTerm(rf.log.length(), reply.XTerm)
+				xindex1 := rf.log.searchTerm(reply.XTerm, rf.log.length())
 				if xindex1 >= rf.log.length() || rf.log.get(xindex1).Team != reply.XTerm {
 					// Case 1: leader doesn't have XTerm
 					nextIndex = reply.XIndex
