@@ -4,6 +4,7 @@ import (
 	"6.824/labrpc"
 	"log"
 	"os"
+	"sync/atomic"
 	"time"
 )
 import "crypto/rand"
@@ -31,7 +32,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 	ck.clientId = nrand()
-	ck.commandId = 0
+	atomic.StoreInt64(&ck.commandId, 0)
 	ck.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
 	//ck.logger.SetOutput(ioutil.Discard)
 	// You'll have to add code here.
@@ -52,8 +53,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-	ck.commandId += 1
-	args := GetArgs{key, ck.clientId, ck.commandId}
+	args := GetArgs{key, ck.clientId, atomic.AddInt64(&ck.commandId, 1)}
 	for {
 		reply := GetReply{}
 		ck.logger.Printf("c -> %v: Call Get. args=%v.\n", ck.lastKnownLeader, args)
@@ -64,7 +64,7 @@ func (ck *Clerk) Get(key string) string {
 				ck.logger.Printf("c -> %v: Successfully finished Get, args=%v, reply=%v.\n", ck.lastKnownLeader, args, reply)
 				return reply.Value
 			default:
-				ck.logger.Printf("c -> %v: Call GET, return error=%v.\n", ck.lastKnownLeader, reply.Err)
+				ck.logger.Printf("c -> %v: Call GET, args=%v, return error=%v.\n", ck.lastKnownLeader, args, reply.Err)
 			}
 		} else {
 			ck.logger.Printf("c -> %v: Fail to call GET. args=%v.\n", ck.lastKnownLeader, args)
@@ -85,8 +85,7 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	ck.commandId += 1
-	args := PutAppendArgs{key, value, op, ck.clientId, ck.commandId}
+	args := PutAppendArgs{key, value, op, ck.clientId, atomic.AddInt64(&ck.commandId, 1)}
 	for {
 		reply := PutAppendReply{}
 		ck.logger.Printf("c -> %v: Call PutAppend. args=%v.\n", ck.lastKnownLeader, args)
@@ -97,7 +96,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ck.logger.Printf("c -> %v: Successfully finished PutAppend, args=%v, reply=%v.\n", ck.lastKnownLeader, args, reply)
 				return
 			default:
-				ck.logger.Printf("c -> %v: Call PUT_APPEND, return error=%v.\n", ck.lastKnownLeader, reply.Err)
+				ck.logger.Printf("c -> %v: Call PUT_APPEND, args=%v, return error=%v.\n", ck.lastKnownLeader, args, reply.Err)
 			}
 		} else {
 			ck.logger.Printf("c -> %v: Fail to call PutAppend. args=%v.\n", ck.lastKnownLeader, args)

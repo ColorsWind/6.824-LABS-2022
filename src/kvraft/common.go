@@ -15,6 +15,8 @@ const (
 	ErrWrongLeader   = "ErrWrongLeader"
 	ErrOutdatedRPC   = "ErrOutdatedRPC"
 	ErrApplySnapshot = "ErrApplySnapshot"
+	ErrTimeout       = "ErrTimeout"
+	ErrNotStarted    = "ErrNotStarted"
 )
 
 type Err string
@@ -33,7 +35,7 @@ type PutAppendArgs struct {
 }
 
 func (args PutAppendArgs) String() string {
-	return fmt.Sprintf("{Key=%v, Value=%v, op=%v, client_id=%v, command_id=%v}", args.Key, raft.ToStringLimited(args.Value, 10), args.Op, args.ClientId, args.CommandId)
+	return fmt.Sprintf("{Key=%v, Value=%v, op=%v, client_id=%v, cmd_id=%v}", args.Key, raft.ToStringLimited(args.Value, 10), args.Op, args.ClientId, args.CommandId)
 }
 
 type PutAppendReply struct {
@@ -53,7 +55,7 @@ type GetArgs struct {
 }
 
 func (args GetArgs) String() string {
-	return fmt.Sprintf("{Key=%v, client_id=%v, command_id=%v}", args.Key, args.ClientId, args.CommandId)
+	return fmt.Sprintf("{Key=%v, client_id=%v, cmd_id=%v}", args.Key, args.ClientId, args.CommandId)
 }
 
 type GetReply struct {

@@ -43,11 +43,15 @@ type Op struct {
 
 type ExecutedOp struct {
 	Op
-	result string
+	Result string
+}
+
+func (ec ExecutedOp) String() string {
+	return fmt.Sprintf("op=%v, result=%v", ec.Op, ec.Result)
 }
 
 func (op Op) String() string {
-	return fmt.Sprintf("client_id=%v, cmd_id=%v, type=%v, Key=%v, Value=%v", op.ClientId, op.CommandId, op.Type, op.Key, op.Value)
+	return fmt.Sprintf("{client_id=%v, cmd_id=%v, type=%v, Key=%v, Value=%v}", op.ClientId, op.CommandId, op.Type, op.Key, op.Value)
 }
 
 type KVServer struct {
@@ -61,80 +65,134 @@ type KVServer struct {
 
 	// Your definitions here.
 	kvMap                 map[string]string
-	clientsRequest        map[int64]*OpCache
 	lastAppliedCommandMap map[int64]ExecutedOp
+	clients               map[int64]*ClientHandler
 	//lastAppliedMap     map[int64]int64
 	lastAppliedIndex int
 	logger           *log.Logger
 }
 
-func (kv *KVServer) createOpCacheWithLock(op Op, term int, index int) *OpCache {
-	opCache := NewOpCache(op.ClientId, op.CommandId, op.Type, op.Key, op.Value, term, index)
-	kv.clientsRequest[opCache.clientId] = opCache
-	//kv.opCachesList = append(kv.opCachesList, opCache)
-	go func() {
-		for !opCache.finished() {
-			time.Sleep(250 * time.Millisecond)
-			currentTerm, isLeader := kv.rf.GetState()
-			kv.mu.Lock()
-			//kv.logger.Printf("%v: wait, opCache=%v, currentTerm=%v, isLeader=%v, lastAppliedMap=%v, rf=%v\n", kv.me, opCache, currentTerm, isLeader, kv.lastAppliedMap[opCache.clientId], kv.rf)
-			kv.mu.Unlock()
-			if !isLeader || opCache.term != currentTerm {
-				if opCache.completeIfUnfinished("", ErrWrongLeader) {
-					kv.logger.Printf("%v: %v timeout.\n", kv.me, opCache)
-				}
-				return
+type ClientHandler struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	clientId  int64
+	commandId int64
+	finished  bool
+	result    string
+	err       Err
+}
 
-			}
+func (handler *ClientHandler) String() string {
+	if handler.mu.TryLock() {
+		defer handler.mu.Unlock()
+	}
+	return fmt.Sprintf("{client_id=%v, cmd_id=%v, finished=%v, result=%v, err=%v}", handler.clientId, handler.commandId, handler.finished, handler.result, handler.err)
+}
+
+func newClientHandler(clientId int64, commandId int64) *ClientHandler {
+	handler := ClientHandler{
+		clientId:  clientId,
+		commandId: commandId,
+		err:       ErrNotStarted,
+		finished:  true,
+	}
+	handler.cond = sync.NewCond(&handler.mu)
+	return &handler
+}
+
+func (kv *KVServer) handleRequest(clientId int64, commandId int64, opType OpType, key string, value string) (result string, err Err) {
+	kv.mu.Lock()
+	handler, present := kv.clients[clientId]
+	if !present || handler.commandId < commandId {
+		handler = newClientHandler(clientId, commandId)
+		kv.clients[clientId] = handler
+	}
+
+	// if already finish
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	lastAppliedCommand, present := kv.lastAppliedCommandMap[clientId]
+	if present && lastAppliedCommand.CommandId == commandId {
+		handler.result = lastAppliedCommand.Result
+		handler.err = OK
+		handler.finished = true
+		handler.cond.Broadcast()
+		kv.mu.Unlock()
+		return handler.result, handler.err
+	} else {
+		kv.mu.Unlock()
+	}
+
+	// if invalid command id
+	if handler.commandId > commandId {
+		kv.logger.Panicf("kvserver %v receive invalid id (handler.id=%v). client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.", kv.me, handler.commandId, clientId, commandId, opType, key, value, handler)
+	}
+
+	// start command
+	if handler.finished && handler.err != OK {
+		// should retry
+		op := Op{clientId, commandId, opType, key, value}
+		_, currentTerm, isLeader := kv.rf.Start(op)
+		if !isLeader {
+			return "", ErrWrongLeader
 		}
+		handler.finished = false
+		handler.err = WaitComplete
 
-	}()
-	return opCache
+		finishCh := make(chan bool)
+		go func() {
+			handler.mu.Lock()
+			for !handler.finished {
+				handler.cond.Wait()
+			}
+			handler.mu.Unlock()
+			finishCh <- true
+		}()
+		go func() {
+			for i := 0; true; i++ {
+				select {
+				case <-finishCh:
+					return
+				case <-time.After(250 * time.Millisecond):
+					currentTerm1, _ := kv.rf.GetState()
+					if currentTerm == currentTerm1 {
+						kv.mu.Lock()
+						kv.logger.Printf("%v: client handler continue to wait, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
+							kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
+						kv.mu.Unlock()
+					} else {
+						kv.mu.Lock()
+						kv.logger.Printf("%v: client handler timeout , currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
+							kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
+						kv.mu.Unlock()
+						handler.mu.Lock()
+						handler.err = ErrApplySnapshot
+						handler.finished = true
+						handler.cond.Broadcast()
+						handler.mu.Unlock()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// wait result
+	for !handler.finished {
+		handler.cond.Wait()
+	}
+	return handler.result, handler.err
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	opCache, present := kv.clientsRequest[args.ClientId]
-	if !present || args.CommandId > opCache.CommandId {
-		// new command
-		op := Op{args.ClientId, args.CommandId, OpType_GET, args.Key, ""}
-		index, currentTerm, isLeader := kv.rf.Start(op)
-		if isLeader {
-			opCache = kv.createOpCacheWithLock(op, currentTerm, index)
-			kv.mu.Unlock()
-			result, err := opCache.get()
-			reply.Value = result
-			reply.Err = err
-			kv.mu.Lock()
-			if err != OK {
-				delete(kv.clientsRequest, args.ClientId)
-			}
-		} else {
-			reply.Err = ErrWrongLeader
-		}
-	} else if args.CommandId == opCache.CommandId {
-		// duplicate command
-		kv.mu.Unlock()
-		result, err := opCache.get()
-		reply.Value = result
-		reply.Err = err
-		kv.mu.Lock()
-		if err != OK {
-			delete(kv.clientsRequest, args.ClientId)
-		}
-	} else {
-		kv.logger.Panicf("kvserver %v receive invalid id (opCache.id=%v). args=%v, opCache=%v.", kv.me, args, opCache.CommandId, opCache)
-	}
+	result, err := kv.handleRequest(args.ClientId, args.CommandId, OpType_GET, args.Key, "VALUE_GET")
+	reply.Value = result
+	reply.Err = err
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	opCache, present := kv.clientsRequest[args.ClientId]
-
 	var opType OpType
 	if args.Op == "Put" {
 		opType = OpType_PUT
@@ -143,35 +201,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	} else {
 		kv.logger.Panicf("Op is not Put or Append: %v.", args)
 	}
-
-	if !present || args.CommandId > opCache.CommandId {
-		// new command
-		op := Op{args.ClientId, args.CommandId, opType, args.Key, args.Value}
-		index, currentTerm, isLeader := kv.rf.Start(op)
-		if isLeader {
-			opCache = kv.createOpCacheWithLock(op, currentTerm, index)
-			kv.mu.Unlock()
-			_, err := opCache.get()
-			reply.Err = err
-			kv.mu.Lock()
-			if err != OK {
-				delete(kv.clientsRequest, args.ClientId)
-			}
-		} else {
-			reply.Err = ErrWrongLeader
-		}
-	} else if args.CommandId == opCache.CommandId {
-		// duplicate command
-		kv.mu.Unlock()
-		_, err := opCache.get()
-		reply.Err = err
-		kv.mu.Lock()
-		if err != OK {
-			delete(kv.clientsRequest, args.ClientId)
-		}
-	} else {
-		kv.logger.Panicf("kvserver %v receive invalid id. args=%v, opCache=%v.", kv.me, args, opCache)
-	}
+	_, err := kv.handleRequest(args.ClientId, args.CommandId, opType, args.Key, args.Value)
+	reply.Err = err
 
 }
 
@@ -253,7 +284,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.kvMap = make(map[string]string)
-	kv.clientsRequest = make(map[int64]*OpCache)
+	kv.clients = make(map[int64]*ClientHandler)
 	kv.lastAppliedCommandMap = make(map[int64]ExecutedOp)
 	kv.lastAppliedIndex = 0
 	go func() {
@@ -262,23 +293,29 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			kv.mu.Lock()
 			kv.logger.Printf("%v: Receive msg: %v.\n", kv.me, msg)
 			if msg.SnapshotValid {
-				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.CommandIndex, msg.Snapshot) {
-					// receive snapshot indicate is not leader
-					kvMap, lastAppliedCommand := kv.decodeState(msg.Snapshot)
-					kv.lastAppliedCommandMap = lastAppliedCommand
-					kv.kvMap = kvMap
-					kv.lastAppliedIndex = msg.SnapshotIndex
-					for clientId, opCache := range kv.clientsRequest {
-						command, present := kv.lastAppliedCommandMap[clientId]
-						if present {
-							if opCache.CommandId == command.CommandId {
-								opCache.completeIfUnfinished(command.result, OK)
-							} else if opCache.CommandId < command.CommandId && !opCache.finished() {
-								kv.logger.Panicf("%v receive invalid command id when applying snapshot. opCache=%v, command=%v.", kv.me, opCache, command)
-							}
-						}
+				for {
+					if msg.SnapshotValid && kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.CommandIndex, msg.Snapshot) {
+						break
+					}
+					msg = <-kv.applyCh
+				}
+				// receive snapshot indicate is not leader
+				kvMap, lastAppliedCommandMap := kv.decodeState(msg.Snapshot)
+				kv.lastAppliedCommandMap = lastAppliedCommandMap
+				kv.kvMap = kvMap
+				kv.lastAppliedIndex = msg.SnapshotIndex
+				for _, command := range lastAppliedCommandMap {
+					handler, present := kv.clients[command.ClientId]
+					if present && handler.commandId == command.CommandId {
+						handler.mu.Lock()
+						handler.result = command.Result
+						handler.err = OK
+						handler.finished = true
+						handler.cond.Broadcast()
+						handler.mu.Unlock()
 					}
 				}
+				kv.logger.Printf("%v: update lastAppliedIndex: %v\n", me, lastAppliedCommandMap)
 			}
 			if msg.CommandValid {
 				command := msg.Command.(Op)
@@ -300,30 +337,26 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 					default:
 						kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
 					}
+					// linearizability: for duplicated command, only the first result is acceptable
+					// because other client may invoke PUT/APPEND command
+					ec := ExecutedOp{command, result}
+					kv.logger.Printf("%v: update %v.\n", me, ec)
+					kv.lastAppliedCommandMap[command.ClientId] = ec
 				} else {
-					switch command.Type {
-					case OpType_GET:
-						result = kv.kvMap[command.Key]
-					case OpType_APPEND, OpType_PUT:
-						// ignore
-					default:
-						kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
-					}
+					result = lastAppliedCommand.Result
 				}
-				kv.lastAppliedCommandMap[command.ClientId] = ExecutedOp{command, result}
+				if result == "" && command.Type == OpType_GET {
+					//log.Printf("dump: rf=%v, kv=%v\n", kv.rf, kv)
+				}
 
-				opCache, present := kv.clientsRequest[command.ClientId]
-				if !present || command.CommandId > opCache.CommandId {
-					// new command
-					if present {
-						opCache.ensureFinished()
-					}
-					opCache = kv.createOpCacheWithLock(command, -1, -1)
-					opCache.complete(result, OK)
-				} else if opCache.CommandId == command.CommandId {
-					opCache.completeIfUnfinished(result, OK)
-				} else {
-					kv.logger.Printf("%v: receive outdated msg, just update state but not change opCache. msg=%v, opCache=%v.", kv.me, msg, opCache)
+				handler, present := kv.clients[command.ClientId]
+				if present && handler.commandId == command.CommandId {
+					handler.mu.Lock()
+					handler.result = result
+					handler.err = OK
+					handler.finished = true
+					handler.cond.Broadcast()
+					handler.mu.Unlock()
 				}
 				kv.lastAppliedIndex = msg.CommandIndex
 			}

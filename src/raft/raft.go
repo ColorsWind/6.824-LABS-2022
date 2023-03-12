@@ -21,7 +21,6 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
@@ -61,7 +60,7 @@ type ApplyMsg struct {
 }
 
 func (msg ApplyMsg) String() string {
-	return fmt.Sprintf("{cmd_valid=%v, cmd=%v, cmd_index=%v, snapshot_valid=%v, snapshot={len=%v}, snapshot_term=%v, snapshot_index=%v}", msg.CommandValid, ToStringLimited(msg.Command, 50), msg.CommandIndex, msg.SnapshotValid, len(msg.Snapshot), msg.SnapshotTerm, msg.SnapshotIndex)
+	return fmt.Sprintf("{cmd_valid=%v, cmd=%v, cmd_index=%v, snapshot_valid=%v, snapshot={len=%v}, snapshot_term=%v, snapshot_index=%v}", msg.CommandValid, ToStringLimited(msg.Command, 100), msg.CommandIndex, msg.SnapshotValid, len(msg.Snapshot), msg.SnapshotTerm, msg.SnapshotIndex)
 }
 
 // raft server state
@@ -615,9 +614,7 @@ func (rf *Raft) onApplyStateMachine() {
 			index := rf.lastApplied + 1
 			if rf.log.containLogEntry(index) {
 				command := rf.log.get(index).Command
-
-				rf.mu.Unlock()
-				rf.applyCh <- ApplyMsg{
+				msg := ApplyMsg{
 					CommandValid:  true,
 					Command:       command,
 					CommandIndex:  index,
@@ -626,10 +623,12 @@ func (rf *Raft) onApplyStateMachine() {
 					SnapshotTerm:  -1,
 					SnapshotIndex: -1,
 				}
-				rf.mu.Lock()
 				// only one goroutine modify lastApplied, so we can do this directly.
 				rf.logger.Printf("%v: apply command to state machine: index=%v, command=%v, rf=%v!\n", rf.me, index, ToStringLimited(command, 10), rf)
 				rf.lastApplied = index
+				rf.mu.Unlock()
+				rf.applyCh <- msg
+				rf.mu.Lock()
 			} else {
 				msg := ApplyMsg{
 					CommandValid:  false,
@@ -640,11 +639,12 @@ func (rf *Raft) onApplyStateMachine() {
 					SnapshotTerm:  rf.log.SnapshotLastIncludedTerm,
 					SnapshotIndex: rf.log.SnapshotLastIncludedIndex,
 				}
+				rf.logger.Printf("%v: apply snapshot to state machine: index=%v: SnapshotIndex=%v, SnapshotTerm=%v, rf=%v!\n", rf.me, index, rf.log.SnapshotLastIncludedIndex, rf.log.SnapshotLastIncludedTerm, rf)
+				rf.lastApplied = rf.log.SnapshotLastIncludedIndex
 				rf.mu.Unlock()
 				rf.applyCh <- msg
 				rf.mu.Lock()
-				rf.logger.Printf("%v: apply snapshot to state machine: index=%v: SnapshotIndex=%v, SnapshotTerm=%v, rf=%v!\n", rf.me, index, rf.log.SnapshotLastIncludedIndex, rf.log.SnapshotLastIncludedTerm, rf)
-				rf.lastApplied = rf.log.SnapshotLastIncludedIndex
+
 			}
 		}
 	}
@@ -1177,7 +1177,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.logger = log.New(os.Stdout, "Raft", log.Lshortfile|log.Lmicroseconds)
 
-	rf.logger.SetOutput(ioutil.Discard)
+	//rf.logger.SetOutput(ioutil.Discard)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
