@@ -149,7 +149,7 @@ func (kv *KVServer) handleRequest(clientId int64, commandId int64, opType OpType
 			finishCh <- true
 		}()
 		go func() {
-			for i := 0; true; i++ {
+			for i := 0; !kv.killed(); i++ {
 				select {
 				case <-finishCh:
 					return
@@ -220,6 +220,16 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	kv.applyCh <- raft.ApplyMsg{
+		CommandValid:  false,
+		Command:       "Shutdown",
+		CommandIndex:  -1,
+		SnapshotValid: false,
+		Snapshot:      nil,
+		SnapshotTerm:  -1,
+		SnapshotIndex: -1,
+	}
+
 }
 
 func (kv *KVServer) killed() bool {
