@@ -162,7 +162,7 @@ func (kv *KVServer) handleRequest(clientId int64, commandId int64, opType OpType
 						kv.mu.Unlock()
 					} else {
 						kv.mu.Lock()
-						kv.logger.Printf("%v: client handler timeout , currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
+						kv.logger.Printf("%v: client handler timeout, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
 							kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
 						kv.mu.Unlock()
 						handler.mu.Lock()
@@ -173,6 +173,17 @@ func (kv *KVServer) handleRequest(clientId int64, commandId int64, opType OpType
 						return
 					}
 				}
+			}
+			if kv.killed() {
+				handler.mu.Lock()
+				if handler.finished == false {
+					kv.logger.Printf("%v: client handler killed, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
+						kv.me, clientId, commandId, opType, key, value, handler)
+					handler.err = ErrShutdown
+					handler.finished = true
+					handler.cond.Broadcast()
+				}
+				handler.mu.Unlock()
 			}
 		}()
 	}
@@ -220,15 +231,15 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
-	kv.applyCh <- raft.ApplyMsg{
-		CommandValid:  false,
-		Command:       "Shutdown",
-		CommandIndex:  -1,
-		SnapshotValid: false,
-		Snapshot:      nil,
-		SnapshotTerm:  -1,
-		SnapshotIndex: -1,
-	}
+	//kv.applyCh <- raft.ApplyMsg{
+	//	CommandValid:  false,
+	//	Command:       "Shutdown",
+	//	CommandIndex:  -1,
+	//	SnapshotValid: false,
+	//	Snapshot:      nil,
+	//	SnapshotTerm:  -1,
+	//	SnapshotIndex: -1,
+	//}
 
 }
 
@@ -299,83 +310,87 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.lastAppliedIndex = 0
 	go func() {
 		for !kv.killed() {
-			msg := <-kv.applyCh
-			kv.mu.Lock()
-			kv.logger.Printf("%v: Receive msg: %v.\n", kv.me, msg)
-			if msg.SnapshotValid {
-				for {
-					if msg.SnapshotValid && kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.CommandIndex, msg.Snapshot) {
-						break
+			select {
+			case msg := <-kv.applyCh:
+				kv.mu.Lock()
+				kv.logger.Printf("%v: Receive msg: %v.\n", kv.me, msg)
+				if msg.SnapshotValid {
+					for {
+						if msg.SnapshotValid && kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.CommandIndex, msg.Snapshot) {
+							break
+						}
+						msg = <-kv.applyCh
 					}
-					msg = <-kv.applyCh
+					// receive snapshot indicate is not leader
+					kvMap, lastAppliedCommandMap := kv.decodeState(msg.Snapshot)
+					kv.lastAppliedCommandMap = lastAppliedCommandMap
+					kv.kvMap = kvMap
+					kv.lastAppliedIndex = msg.SnapshotIndex
+					for _, command := range lastAppliedCommandMap {
+						handler, present := kv.clients[command.ClientId]
+						if present && handler.commandId == command.CommandId {
+							handler.mu.Lock()
+							handler.result = command.Result
+							handler.err = OK
+							handler.finished = true
+							handler.cond.Broadcast()
+							handler.mu.Unlock()
+						}
+					}
+					kv.logger.Printf("%v: update lastAppliedIndex: %v\n", me, lastAppliedCommandMap)
 				}
-				// receive snapshot indicate is not leader
-				kvMap, lastAppliedCommandMap := kv.decodeState(msg.Snapshot)
-				kv.lastAppliedCommandMap = lastAppliedCommandMap
-				kv.kvMap = kvMap
-				kv.lastAppliedIndex = msg.SnapshotIndex
-				for _, command := range lastAppliedCommandMap {
+				if msg.CommandValid {
+					command := msg.Command.(Op)
+
+					// update state machine
+					result := ""
+					lastAppliedCommand := kv.lastAppliedCommandMap[command.ClientId]
+					if command.CommandId != lastAppliedCommand.CommandId && command.CommandId != lastAppliedCommand.CommandId+1 {
+						kv.logger.Panicf("%v receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", me, msg, lastAppliedCommand.CommandId)
+					}
+					if command.CommandId == lastAppliedCommand.CommandId+1 {
+						switch command.Type {
+						case OpType_GET:
+							result = kv.kvMap[command.Key]
+						case OpType_PUT:
+							kv.kvMap[command.Key] = command.Value
+						case OpType_APPEND:
+							kv.kvMap[command.Key] = kv.kvMap[command.Key] + command.Value
+						default:
+							kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
+						}
+						// linearizability: for duplicated command, only the first result is acceptable
+						// because other client may invoke PUT/APPEND command
+						ec := ExecutedOp{command, result}
+						kv.logger.Printf("%v: update %v.\n", me, ec)
+						kv.lastAppliedCommandMap[command.ClientId] = ec
+					} else {
+						result = lastAppliedCommand.Result
+					}
+					if result == "" && command.Type == OpType_GET {
+						//log.Printf("dump: rf=%v, kv=%v\n", kv.rf, kv)
+					}
+
 					handler, present := kv.clients[command.ClientId]
 					if present && handler.commandId == command.CommandId {
 						handler.mu.Lock()
-						handler.result = command.Result
+						handler.result = result
 						handler.err = OK
 						handler.finished = true
 						handler.cond.Broadcast()
 						handler.mu.Unlock()
 					}
+					kv.lastAppliedIndex = msg.CommandIndex
 				}
-				kv.logger.Printf("%v: update lastAppliedIndex: %v\n", me, lastAppliedCommandMap)
+				if maxraftstate > 0 && persister.RaftStateSize() > maxraftstate {
+					kv.logger.Printf("%v: raft state size greater maxraftstate(%v > %v), trim log.\n", kv.me, persister.RaftStateSize(), maxraftstate)
+					snapshot := kv.encodeState(kv.kvMap, kv.lastAppliedCommandMap)
+					kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
+				}
+				kv.mu.Unlock()
+			case <-time.After(250 * time.Millisecond):
+				continue
 			}
-			if msg.CommandValid {
-				command := msg.Command.(Op)
-
-				// update state machine
-				result := ""
-				lastAppliedCommand := kv.lastAppliedCommandMap[command.ClientId]
-				if command.CommandId != lastAppliedCommand.CommandId && command.CommandId != lastAppliedCommand.CommandId+1 {
-					kv.logger.Panicf("%v receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", me, msg, lastAppliedCommand.CommandId)
-				}
-				if command.CommandId == lastAppliedCommand.CommandId+1 {
-					switch command.Type {
-					case OpType_GET:
-						result = kv.kvMap[command.Key]
-					case OpType_PUT:
-						kv.kvMap[command.Key] = command.Value
-					case OpType_APPEND:
-						kv.kvMap[command.Key] = kv.kvMap[command.Key] + command.Value
-					default:
-						kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
-					}
-					// linearizability: for duplicated command, only the first result is acceptable
-					// because other client may invoke PUT/APPEND command
-					ec := ExecutedOp{command, result}
-					kv.logger.Printf("%v: update %v.\n", me, ec)
-					kv.lastAppliedCommandMap[command.ClientId] = ec
-				} else {
-					result = lastAppliedCommand.Result
-				}
-				if result == "" && command.Type == OpType_GET {
-					//log.Printf("dump: rf=%v, kv=%v\n", kv.rf, kv)
-				}
-
-				handler, present := kv.clients[command.ClientId]
-				if present && handler.commandId == command.CommandId {
-					handler.mu.Lock()
-					handler.result = result
-					handler.err = OK
-					handler.finished = true
-					handler.cond.Broadcast()
-					handler.mu.Unlock()
-				}
-				kv.lastAppliedIndex = msg.CommandIndex
-			}
-			if maxraftstate > 0 && persister.RaftStateSize() > maxraftstate {
-				kv.logger.Printf("%v: raft state size greater maxraftstate(%v > %v), trim log.\n", kv.me, persister.RaftStateSize(), maxraftstate)
-				snapshot := kv.encodeState(kv.kvMap, kv.lastAppliedCommandMap)
-				kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
-			}
-			kv.mu.Unlock()
 
 		}
 	}()

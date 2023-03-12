@@ -607,7 +607,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // call this function WITHOUT lock
 func (rf *Raft) onApplyStateMachine() {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//defer rf.mu.Unlock()
 	for !rf.killed() {
 		rf.applyCond.Wait()
 		for rf.commitIndex > rf.lastApplied {
@@ -648,6 +648,7 @@ func (rf *Raft) onApplyStateMachine() {
 			}
 		}
 	}
+	rf.mu.Unlock()
 }
 
 type InstallSnapshotArgs struct {
@@ -786,7 +787,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		server := server
 		go func() {
 			rf.mu.Lock()
-			for {
+			for !rf.killed() {
 				retry, immediate, success := rf.checkSendAppendEntriesWithLock(server, term, lastLogIndex)
 				if success {
 					rf.checkCommitWithLock()
@@ -993,6 +994,9 @@ func (rf *Raft) checkCommitWithLock() {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	//rf.mu.Lock()
+	//close(rf.applyCh)
+	//rf.mu.Unlock()
 	rf.applyCond.Broadcast()
 }
 

@@ -17,6 +17,7 @@ const (
 	ErrApplySnapshot = "ErrApplySnapshot"
 	ErrTimeout       = "ErrTimeout"
 	ErrNotStarted    = "ErrNotStarted"
+	ErrShutdown      = "ErrShutdown"
 )
 
 type Err string
