@@ -21,6 +21,7 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
@@ -91,7 +92,7 @@ func maxInt(x, y int) int {
 func ToStringLimited(c interface{}, limit int) string {
 	s := fmt.Sprintf("%v", c)
 	if len(s) > limit {
-		s = s[:limit]
+		s = s[:limit] + "..."
 	}
 	return s
 }
@@ -171,11 +172,11 @@ func (holder *LogsHolder) applySnapshot(data []byte, index int, term int) {
 	holder.EntriesFirstIndex = index + 1
 }
 
-func (holder *LogsHolder) containTerm(index int) bool {
+func (holder *LogsHolder) containLogEntryTerm(index int) bool {
 	return index-holder.EntriesFirstIndex >= -1
 }
 
-func (holder *LogsHolder) containLogEntry(index int) bool {
+func (holder *LogsHolder) containLogEntryAll(index int) bool {
 	return index-holder.EntriesFirstIndex >= 0
 }
 
@@ -352,7 +353,7 @@ func (rf *Raft) readPersist(data []byte, snapshot []byte) {
 			Entries:                   entries,
 			Snapshot:                  snapshot,
 			SnapshotLastIncludedIndex: snapshotLastIncludedIndex,
-			SnapshotLastIncludedTerm:  snapshotLastIncludedIndex,
+			SnapshotLastIncludedTerm:  snapshotLastIncludedTerm,
 		}
 	}
 	rf.logger.Printf("%v: boot from persisit.\n", rf.me)
@@ -514,7 +515,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	// Because of snapshot, cases are complicated.
-	if args.PrevLogIndex < rf.log.length() && !rf.log.containLogEntry(args.PrevLogIndex) {
+	if args.PrevLogIndex < rf.log.length() && !rf.log.containLogEntryAll(args.PrevLogIndex) {
 		if args.PrevLogIndex+1+len(args.Entries) >= rf.log.length() {
 			// here exists useful entries, rewrite args
 			args.Entries = args.Entries[rf.log.SnapshotLastIncludedIndex+1-(args.PrevLogIndex+1):]
@@ -612,7 +613,7 @@ func (rf *Raft) onApplyStateMachine() {
 		rf.applyCond.Wait()
 		for rf.commitIndex > rf.lastApplied {
 			index := rf.lastApplied + 1
-			if rf.log.containLogEntry(index) {
+			if rf.log.containLogEntryAll(index) {
 				command := rf.log.get(index).Command
 				msg := ApplyMsg{
 					CommandValid:  true,
@@ -644,11 +645,13 @@ func (rf *Raft) onApplyStateMachine() {
 				rf.mu.Unlock()
 				rf.applyCh <- msg
 				rf.mu.Lock()
-
 			}
 		}
 	}
+	ch := rf.applyCh
 	rf.mu.Unlock()
+	close(ch)
+
 }
 
 type InstallSnapshotArgs struct {
@@ -832,7 +835,7 @@ func (rf *Raft) checkSendAppendEntriesWithLock(server int, expectTerm int, expec
 	term := rf.currentTerm
 	prevLogIndex := rf.nextIndex[server] - 1
 	rf.logger.Printf("%v -> %v: checkSendAppendEntries, prevLogIndex=%v, rf=%v.\n", rf.me, server, prevLogIndex, rf)
-	if rf.log.containTerm(prevLogIndex) {
+	if rf.log.containLogEntryTerm(prevLogIndex) {
 		prevLogTerm := rf.log.getTerm(prevLogIndex)
 		// should send AppendEntries with THAT term to prevent incorrectly receiving outdated messages
 		args := AppendEntriesArgs{term, rf.me, prevLogIndex, prevLogTerm, rf.log.slice(prevLogIndex+1, rf.log.length()), rf.commitIndex}
@@ -1182,7 +1185,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.logger = log.New(os.Stdout, "Raft", log.Lshortfile|log.Lmicroseconds)
 
-	//rf.logger.SetOutput(ioutil.Discard)
+	rf.logger.SetOutput(ioutil.Discard)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
