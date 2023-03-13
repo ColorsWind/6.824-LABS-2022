@@ -128,7 +128,7 @@ func (kv *KVServer) handleRequest(clientId int64, commandId int64, opType OpType
 		kv.logger.Panicf("kvserver %v receive invalid id (handler.id=%v). client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.", kv.me, handler.commandId, clientId, commandId, opType, key, value, handler)
 	}
 
-	// start command
+	// if not started
 	if handler.finished && handler.err != OK {
 		// should retry
 		op := Op{clientId, commandId, opType, key, value}
@@ -139,51 +139,39 @@ func (kv *KVServer) handleRequest(clientId int64, commandId int64, opType OpType
 		handler.finished = false
 		handler.err = WaitComplete
 
-		finishCh := make(chan bool)
 		go func() {
-			handler.mu.Lock()
-			for !handler.finished {
-				handler.cond.Wait()
-			}
-			handler.mu.Unlock()
-			finishCh <- true
-		}()
-		go func() {
-			for i := 0; !kv.killed(); i++ {
-				select {
-				case <-finishCh:
-					return
-				case <-time.After(250 * time.Millisecond):
-					currentTerm1, _ := kv.rf.GetState()
-					if currentTerm == currentTerm1 {
-						kv.mu.Lock()
-						kv.logger.Printf("%v: client handler continue to wait, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
-							kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
-						kv.mu.Unlock()
-					} else {
-						kv.mu.Lock()
-						kv.logger.Printf("%v: client handler timeout, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
-							kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
-						kv.mu.Unlock()
-						handler.mu.Lock()
-						handler.err = ErrApplySnapshot
+			for i := 0; true; i++ {
+				time.Sleep(250 * time.Millisecond)
+				if kv.killed() {
+					handler.mu.Lock()
+					if handler.finished == false {
+						kv.logger.Printf("%v: client handler killed, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
+							kv.me, clientId, commandId, opType, key, value, handler)
+						handler.err = ErrShutdown
 						handler.finished = true
 						handler.cond.Broadcast()
-						handler.mu.Unlock()
-						return
 					}
+					handler.mu.Unlock()
+					return
 				}
-			}
-			if kv.killed() {
-				handler.mu.Lock()
-				if handler.finished == false {
-					kv.logger.Printf("%v: client handler killed, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
-						kv.me, clientId, commandId, opType, key, value, handler)
-					handler.err = ErrShutdown
+				currentTerm1, _ := kv.rf.GetState()
+				if currentTerm == currentTerm1 {
+					kv.mu.Lock()
+					kv.logger.Printf("%v: client handler continue to wait, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
+						kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
+					kv.mu.Unlock()
+				} else {
+					kv.mu.Lock()
+					kv.logger.Printf("%v: client handler timeout, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
+						kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
+					kv.mu.Unlock()
+					handler.mu.Lock()
+					handler.err = ErrApplySnapshot
 					handler.finished = true
 					handler.cond.Broadcast()
+					handler.mu.Unlock()
+					return
 				}
-				handler.mu.Unlock()
 			}
 		}()
 	}
