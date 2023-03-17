@@ -63,3 +63,10 @@
    经过实践，发现给每条Command一个随机，全局唯一的编号有困难。考虑到Hint中提到一个Client在同一时间只会发出一个请求，收到一个请求可以假定上一个请求的reply已经被Client接受（即不会再向kvserver重复请求上一次请求Command的执行结果了），因此一种实现的方式：Client有一个唯一随机编号、每个Command有一个自增id。
 
 4. Hint中提到有两种方式检测raft失去leadership（从而我们可以kvserver可以返回reply：ErrWrongLeader）：检测Start()返回的index和检测GetState()返回的term。实践表明前一种由于死锁方式无法通过`Test: completion after heal (3A)`，因此这里实现了第二种方式。
+
+*3B*
+
+1. 需要正确处理`kill()`，保证所有goroutine在合理的时间内结束，注意各种边界情况
+2. 重新设计数据结构：
+   1. clientRequest map[client_id] request_handler **volatile**
+   2. lastAppliedCommand map[client_id] command **persistent**
