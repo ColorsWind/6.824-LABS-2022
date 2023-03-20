@@ -40,7 +40,8 @@ func TestReBalance(t *testing.T) {
 		for k := range xGil {
 			xGil[k].gid = rand.Intn(65536) + 1
 		}
-		for k := 0; k < NShards; k++ {
+		lackN := rand.Intn(NShards)
+		for k := 0; k < NShards-lackN; k++ {
 			shard := rand.Intn(groupN)
 			xGil[shard].shards = append(xGil[shard].shards, k)
 		}

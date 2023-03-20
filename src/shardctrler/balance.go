@@ -1,7 +1,7 @@
 package shardctrler
 
 import (
-	"6.824/raft"
+	"fmt"
 	"log"
 	"sort"
 )
@@ -9,6 +9,10 @@ import (
 type GroupItem struct {
 	gid    int
 	shards []int
+}
+
+func (gi GroupItem) String() string {
+	return fmt.Sprintf("{gid=%v, shards=%v}", gi.gid, gi.shards)
 }
 
 type GroupItemList []GroupItem
@@ -44,43 +48,66 @@ func initBalance(gids []int) (shards [NShards]int) {
 	return shards
 }
 func reBalance(items GroupItemList) (balancedItems GroupItemList) {
+	// for deterministic, sort first
 	balancedItems = make([]GroupItem, items.Len())
-	copy(balancedItems, items)
-	sort.Sort(balancedItems)
-	average := NShards / len(items)
-	remainder := NShards - len(items)*average
-	expected := make([]int, len(balancedItems))
-	for k := 0; k < remainder; k++ {
-		expected[k] = average + 1
-	}
-	for k := remainder; k < len(balancedItems); k++ {
-		expected[k] = average
+	{
+		copy(balancedItems, items)
+		sort.Sort(balancedItems)
 	}
 
-	i, j := 0, len(balancedItems)-1
-	for i < j {
-		shardsI := balancedItems[i].shards
-		if len(shardsI) <= expected[i] {
-			if len(shardsI) < expected[i] {
-				log.Panicf("len of %v < %v, balancedItems=%v.", len(shardsI), expected[i], balancedItems)
-			}
-			i++
-			continue
+	// calculate expect count
+	expected := make([]int, len(balancedItems))
+	{
+		average := NShards / len(items)
+		remainder := NShards - len(items)*average
+		for k := 0; k < remainder; k++ {
+			expected[k] = average + 1
 		}
-		shardsJ := balancedItems[j].shards
-		if len(shardsJ) >= expected[j] {
-			if len(shardsJ) > expected[j] {
-				log.Panicf("len of %v > %v, balancedItems=%v.", len(shardsJ), expected[j], balancedItems)
-			}
-			j--
-			continue
+		for k := remainder; k < len(balancedItems); k++ {
+			expected[k] = average
 		}
-		// move balancedItems[i] to balancedItems[j]
-		popN := len(shardsI) - expected[i]
-		pushN := expected[j] - len(shardsJ)
-		moveN := raft.MinInt(pushN, popN)
-		balancedItems[i].shards = shardsI[:len(shardsI)-moveN]
-		balancedItems[j].shards = append(shardsJ, shardsI[len(shardsI)-moveN:]...)
+	}
+
+	// collect not assign
+	var notAssignShardList []int
+	{
+		notAssignShardMap := make(map[int]int)
+		for shard := 0; shard < NShards; shard++ {
+			notAssignShardMap[shard] = 1
+		}
+		for _, item := range balancedItems {
+			for _, shard := range item.shards {
+				delete(notAssignShardMap, shard)
+			}
+		}
+
+		for shard, _ := range notAssignShardMap {
+			notAssignShardList = append(notAssignShardList, shard)
+		}
+		sort.Sort(sort.IntSlice(notAssignShardList))
+	}
+
+	// remove the number of occurrence > expect
+	for k := range balancedItems {
+		item := &balancedItems[k]
+		if len(item.shards) > expected[k] {
+			notAssignShardList = append(notAssignShardList, item.shards[expected[k]:]...)
+			item.shards = item.shards[:expected[k]]
+		}
+	}
+
+	// put if the number of occurrence < expect
+	for k := range balancedItems {
+		item := &balancedItems[k]
+		lackN := expected[k] - len(item.shards)
+		if lackN > 0 {
+			item.shards = append(item.shards, notAssignShardList[:lackN]...)
+			notAssignShardList = notAssignShardList[lackN:]
+		}
+	}
+
+	if len(notAssignShardList) != 0 {
+		log.Panicf("notAssignShardList (%v) is not empty.  items=%v, balancedItems=%v, expected=%v.", notAssignShardList, items, balancedItems, expected)
 	}
 	return
 }
@@ -92,7 +119,10 @@ func shardToGroupItemList(shards [NShards]int, groupN int) GroupItemList {
 	}
 	var gil GroupItemList
 	for gid, gShards := range gidToShards {
-		gil = append(gil, GroupItem{gid, gShards})
+		if gid != 0 {
+			gil = append(gil, GroupItem{gid, gShards})
+		}
+
 	}
 	return gil
 }
