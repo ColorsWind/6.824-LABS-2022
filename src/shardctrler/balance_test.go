@@ -2,6 +2,7 @@ package shardctrler
 
 import (
 	"log"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -45,5 +46,23 @@ func TestReBalance(t *testing.T) {
 		if got != want {
 			t.Errorf("index=%v, want=%v, got=%v. context: expected=%v, groupN=%v, gil=%v, exist=%v.", k, want, got, expected, groupN, gil, shards)
 		}
+	}
+}
+
+func TestConvert(t *testing.T) {
+	rand.Seed(time.Now().UnixNano())
+	shards := make([]int, NShards)
+	groupN := rand.Intn(NShards) + 1
+	log.Printf("Test groupN=%v.\n", groupN)
+	for gid := 0; gid < NShards; gid++ {
+		shards[gid] = gid % groupN
+	}
+	gil := shardToGroupItemList(shards, groupN)
+	xShards, xGroupN := groupItemListToShard(gil)
+	if !reflect.DeepEqual(shards, xShards) {
+		t.Errorf("shards: %v != %v, gil=%v.", shards, xShards, gil)
+	}
+	if groupN != xGroupN {
+		t.Errorf("groupN: %v != %v.", groupN, xGroupN)
 	}
 }
