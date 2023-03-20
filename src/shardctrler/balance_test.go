@@ -14,9 +14,12 @@ func TestReBalance(t *testing.T) {
 	groupN := rand.Intn(NShards) + 1
 	gil := make(GroupItemList, groupN)
 	log.Printf("Test groupN=%v.\n", groupN)
+	for k := range gil {
+		gil[k].gid = rand.Intn(65536) + 1
+	}
 	for k := 0; k < NShards; k++ {
-		randNum := rand.Intn(groupN)
-		gil[randNum].shards = append(gil[randNum].shards, k)
+		shard := rand.Intn(groupN)
+		gil[shard].shards = append(gil[shard].shards, k)
 	}
 	average := NShards / groupN
 	remainder := NShards - groupN*average
@@ -55,7 +58,7 @@ func TestConvert(t *testing.T) {
 	groupN := rand.Intn(NShards) + 1
 	log.Printf("Test groupN=%v.\n", groupN)
 	for gid := 0; gid < NShards; gid++ {
-		shards[gid] = gid % groupN
+		shards[gid] = rand.Intn(10) + 100
 	}
 	gil := shardToGroupItemList(shards, groupN)
 	xShards, xGroupN := groupItemListToShard(gil)
