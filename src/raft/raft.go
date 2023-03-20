@@ -74,7 +74,7 @@ const (
 	State_LEADER    = "LEADER"
 )
 
-func minInt(x, y int) int {
+func MinInt(x, y int) int {
 	if x < y {
 		return x
 	}
@@ -593,7 +593,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
-		commitIndex := minInt(args.LeaderCommit, rf.log.length()-1)
+		commitIndex := MinInt(args.LeaderCommit, rf.log.length()-1)
 		rf.commitIndex = commitIndex
 	}
 	if rf.log.length() <= rf.commitIndex {
