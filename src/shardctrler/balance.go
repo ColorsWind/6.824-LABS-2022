@@ -18,11 +18,30 @@ func (gil GroupItemList) Len() int {
 }
 
 func (gil GroupItemList) Less(i, j int) bool {
-	return len(gil[i].shards) > len(gil[j].shards)
+	gili := gil[i]
+	gilj := gil[j]
+	if len(gili.shards) > len(gilj.shards) {
+		return true
+	} else if len(gili.shards) == len(gilj.shards) {
+		// for deterministic
+		return gili.gid > gilj.gid
+	} else {
+		return false
+	}
 }
 
 func (gil GroupItemList) Swap(i, j int) {
 	gil[j], gil[i] = gil[i], gil[j]
+}
+
+func initBalance(gids []int) (shards [NShards]int) {
+	shardsSorted := sort.IntSlice(shards[:])
+	// for deterministic
+	sort.Sort(shardsSorted)
+	for k := range shardsSorted {
+		shards[k] = gids[k%len(gids)]
+	}
+	return shards
 }
 func reBalance(items GroupItemList) (balancedItems GroupItemList) {
 	balancedItems = make([]GroupItem, items.Len())
@@ -81,9 +100,9 @@ func shardToGroupItemList(shards []int, groupN int) GroupItemList {
 func groupItemListToShard(gil GroupItemList) (shards []int, groupN int) {
 	groupN = gil.Len()
 	shards = make([]int, NShards)
-	for gid, item := range gil {
+	for _, item := range gil {
 		for _, shard := range item.shards {
-			shards[shard] = gid
+			shards[shard] = item.gid
 		}
 	}
 	return shards, groupN
