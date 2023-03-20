@@ -75,36 +75,43 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	_, err := sc.handleRequest(args.ClientId, args.CommandId, OpType_JOIN, args.Servers, nil, -1, -1, -1)
 	reply.Err = err
 	reply.WrongLeader = err == ErrWrongLeader
-	sc.logger.Printf("%v: receive join request, reply=%v.\n", sc.me, reply)
+	sc.logger.Printf("%v: finish join request, args=%v, reply=%v, config=%v.\n", sc.me, args, reply, sc.getConfig())
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
 	sc.logger.Printf("%v: receive leave request, args=%v.\n", sc.me, args)
-	_, err := sc.handleRequest(args.ClientId, args.CommandId, OpType_JOIN, nil, args.GIDs, -1, -1, -1)
+	_, err := sc.handleRequest(args.ClientId, args.CommandId, OpType_LEAVE, nil, args.GIDs, -1, -1, -1)
 	reply.Err = err
 	reply.WrongLeader = err == ErrWrongLeader
-	sc.logger.Printf("%v: receive leave request, reply=%v.\n", sc.me, reply)
+	sc.logger.Printf("%v: finish leave request, args=%v, reply=%v, config=%v.\n", sc.me, args, reply, sc.getConfig())
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
 	sc.logger.Printf("%v: receive move request, args=%v.\n", sc.me, args)
-	_, err := sc.handleRequest(args.ClientId, args.CommandId, OpType_JOIN, nil, nil, args.Shard, args.GID, -1)
+	_, err := sc.handleRequest(args.ClientId, args.CommandId, OpType_MOVE, nil, nil, args.Shard, args.GID, -1)
 	reply.Err = err
 	reply.WrongLeader = err == ErrWrongLeader
-	sc.logger.Printf("%v: finish move request, reply=%v.\n", sc.me, reply)
+	sc.logger.Printf("%v: finish move request, args=%v, reply=%v, config=%v.\n", sc.me, args, reply, sc.getConfig())
 
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
 	sc.logger.Printf("%v: receive query request, args=%v.\n", sc.me, args)
-	result, err := sc.handleRequest(args.ClientId, args.CommandId, OpType_JOIN, nil, nil, -1, -1, args.Num)
+	result, err := sc.handleRequest(args.ClientId, args.CommandId, OpType_QUERY, nil, nil, -1, -1, args.Num)
 	reply.Err = err
 	reply.WrongLeader = err == ErrWrongLeader
 	reply.Config = result
-	sc.logger.Printf("%v: finish query request, reply=%v.\n", sc.me, reply)
+
+	sc.logger.Printf("%v: finish query request, args=%v, reply=%v.\n", sc.me, args, reply)
+}
+
+func (sc *ShardCtrler) getConfig() Config {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.configs[len(sc.configs)-1]
 }
 
 //
@@ -271,6 +278,7 @@ func (sc *ShardCtrler) handleReceiveMsg(msg raft.ApplyMsg) {
 					result = sc.configs[command.Num]
 				}
 			}
+			sc.lastAppliedCommandMap[command.ClientId] = ExecutedOp{command, result}
 		} else {
 			result = lastAppliedCommand.Result
 		}

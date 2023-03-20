@@ -61,7 +61,7 @@ type ApplyMsg struct {
 }
 
 func (msg ApplyMsg) String() string {
-	return fmt.Sprintf("{cmd_valid=%v, cmd=%v, cmd_index=%v, snapshot_valid=%v, snapshot={len=%v}, snapshot_term=%v, snapshot_index=%v}", msg.CommandValid, ToStringLimited(msg.Command, 100), msg.CommandIndex, msg.SnapshotValid, len(msg.Snapshot), msg.SnapshotTerm, msg.SnapshotIndex)
+	return fmt.Sprintf("{cmd_valid=%v, cmd=%v, cmd_index=%v, snapshot_valid=%v, snapshot={len=%v}, snapshot_term=%v, snapshot_index=%v}", msg.CommandValid, ToStringLimited(msg.Command, 200), msg.CommandIndex, msg.SnapshotValid, len(msg.Snapshot), msg.SnapshotTerm, msg.SnapshotIndex)
 }
 
 // raft server state
