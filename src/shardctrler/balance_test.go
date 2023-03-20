@@ -9,6 +9,19 @@ import (
 )
 import "math/rand"
 
+func getExpectedCount(groupN int) (expected []int) {
+	average := NShards / groupN
+	remainder := NShards - groupN*average
+	expected = make([]int, groupN)
+	for k := 0; k < remainder; k++ {
+		expected[k] = average + 1
+	}
+	for k := remainder; k < groupN; k++ {
+		expected[k] = average
+	}
+	return expected
+}
+
 func TestReBalance(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	groupN := rand.Intn(NShards) + 1
@@ -16,15 +29,7 @@ func TestReBalance(t *testing.T) {
 	log.Printf("Test groupN=%v.\n", groupN)
 
 	// fill expected
-	average := NShards / groupN
-	remainder := NShards - groupN*average
-	expected := make([]int, groupN)
-	for k := 0; k < remainder; k++ {
-		expected[k] = average + 1
-	}
-	for k := remainder; k < groupN; k++ {
-		expected[k] = average
-	}
+	expected := getExpectedCount(groupN)
 
 	// test 10 times
 	var firstGil GroupItemList
@@ -75,12 +80,39 @@ func TestReBalance(t *testing.T) {
 }
 
 func TestInitBalance(t *testing.T) {
-	//initBalance()
+	rand.Seed(time.Now().UnixNano())
+	groupN := rand.Intn(NShards) + 1
+	log.Printf("Test groupN=%v.\n", groupN)
+	var shardsFirst [NShards]int
+	for x := 0; x < 10; x++ {
+		gids := make([]int, groupN)
+		for i := range gids {
+			gids[i] = i + 100
+		}
+		shards := initBalance(gids)
+
+		// check count, re-balance should not modify
+		gil := shardToGroupItemList(shards, groupN)
+		gil = reBalance(gil)
+		shardsBalanced, _ := groupItemListToShard(gil)
+		if shards != shardsBalanced {
+			t.Errorf("init not balanced, %v != %v.", shards, shardsBalanced)
+		}
+
+		// check deterministic
+		if x > 0 {
+			if shards != shardsFirst {
+				t.Errorf("init not deterministic, %v != %v.", shards, shardsFirst)
+			}
+		} else {
+			shardsFirst = shards
+		}
+	}
 }
 
 func TestConvert(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
-	shards := make([]int, NShards)
+	var shards [NShards]int
 	groupN := rand.Intn(NShards) + 1
 	log.Printf("Test groupN=%v.\n", groupN)
 	for shard := 0; shard < NShards; shard++ {

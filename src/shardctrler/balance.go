@@ -85,7 +85,7 @@ func reBalance(items GroupItemList) (balancedItems GroupItemList) {
 	return
 }
 
-func shardToGroupItemList(shards []int, groupN int) GroupItemList {
+func shardToGroupItemList(shards [NShards]int, groupN int) GroupItemList {
 	gidToShards := make(map[int][]int)
 	for shard, gid := range shards {
 		gidToShards[gid] = append(gidToShards[gid], shard)
@@ -97,9 +97,8 @@ func shardToGroupItemList(shards []int, groupN int) GroupItemList {
 	return gil
 }
 
-func groupItemListToShard(gil GroupItemList) (shards []int, groupN int) {
+func groupItemListToShard(gil GroupItemList) (shards [NShards]int, groupN int) {
 	groupN = gil.Len()
-	shards = make([]int, NShards)
 	for _, item := range gil {
 		for _, shard := range item.shards {
 			shards[shard] = item.gid
