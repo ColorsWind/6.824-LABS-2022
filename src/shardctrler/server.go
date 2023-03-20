@@ -191,36 +191,26 @@ func (sc *ShardCtrler) handleReceiveMsg(msg raft.ApplyMsg) {
 				// The shardctrler should allow re-use of a GID if it's not part of the current configuration
 				// (i.e. a GID should be allowed to Join, then Leave, then Join again).
 
-				if cf.Num == 0 {
-					var gids []int
-					for gid, _ := range command.Servers {
-						gids = append(gids, gid)
+				servers := make(map[int][]string)
+				for gid, group := range cf.Groups {
+					servers[gid] = group
+				}
+				gil := shardToGroupItemList(cf.Shards, len(cf.Groups))
+				for gid, group := range command.Servers {
+					element, present := servers[gid]
+					if present {
+						sc.logger.Panicf("%v: duplicate join, server already exist: servers[%v]=%v.", sc.me, gid, element)
 					}
-					cf = Config{
-						Num:    1,
-						Shards: initBalance(gids),
-						Groups: command.Servers,
-					}
-				} else {
-					servers := make(map[int][]string)
-					for gid, group := range cf.Groups {
-						servers[gid] = group
-					}
-					for gid, group := range command.Servers {
-						element, present := servers[gid]
-						if present {
-							sc.logger.Panicf("%v: duplicate join, server already exist: servers[%v]=%v.", sc.me, gid, element)
-						}
-						servers[gid] = group
-					}
-					gil := shardToGroupItemList(cf.Shards, len(cf.Groups))
-					gil = reBalance(gil)
-					shardsBalanced, _ := groupItemListToShard(gil)
-					cf = Config{
-						Num:    cf.Num + 1,
-						Shards: shardsBalanced,
-						Groups: servers,
-					}
+					gil = append(gil, GroupItem{gid, []int{}})
+					servers[gid] = group
+				}
+
+				gil = reBalance(gil)
+				shardsBalanced, _ := groupItemListToShard(gil)
+				cf = Config{
+					Num:    cf.Num + 1,
+					Shards: shardsBalanced,
+					Groups: servers,
 				}
 				sc.configs = append(sc.configs, cf)
 			case OpType_LEAVE:
@@ -233,13 +223,21 @@ func (sc *ShardCtrler) handleReceiveMsg(msg raft.ApplyMsg) {
 				for gid, group := range cf.Groups {
 					servers[gid] = group
 				}
-				for gid := range command.GIDs {
+
+				leaveGidsMap := make(map[int]int)
+				for _, gid := range command.GIDs {
 					if _, present := servers[gid]; !present {
 						sc.logger.Panicf("%v: leave non-exist server %v: servers=%v.", sc.me, gid, servers)
 					}
 					delete(servers, gid)
+					leaveGidsMap[gid] = 1
 				}
-				gil := shardToGroupItemList(cf.Shards, len(cf.Groups))
+				var gil GroupItemList
+				for _, item := range shardToGroupItemList(cf.Shards, len(cf.Groups)) {
+					if _, present := leaveGidsMap[item.gid]; !present {
+						gil = append(gil, item)
+					}
+				}
 				gil = reBalance(gil)
 				shardsBalanced, _ := groupItemListToShard(gil)
 				cf = Config{

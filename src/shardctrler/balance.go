@@ -48,6 +48,12 @@ func initBalance(gids []int) (shards [NShards]int) {
 	return shards
 }
 func reBalance(items GroupItemList) (balancedItems GroupItemList) {
+	if len(items) > NShards {
+		log.Panicf("len of %v greater than %v.", items, NShards)
+	}
+	if len(items) == 0 {
+		return items
+	}
 	// for deterministic, sort first
 	balancedItems = make([]GroupItem, items.Len())
 	{
