@@ -7,6 +7,7 @@ package shardctrler
 import (
 	"6.824/labrpc"
 	"log"
+	mathRand "math/rand"
 	"os"
 	"sync/atomic"
 )
@@ -34,6 +35,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 	ck.clientId = nrand()
 	atomic.StoreInt64(&ck.commandId, 0)
 	ck.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
@@ -44,13 +46,13 @@ func (ck *Clerk) Query(num int) Config {
 	// Your code here.
 	args := QueryArgs{ck.clientId, atomic.AddInt64(&ck.commandId, 1), num}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
+		for i := 0; i < len(ck.servers); i++ {
 			var reply QueryReply
-			ok := srv.Call("ShardCtrler.Query", &args, &reply)
+			ok := ck.servers[ck.lastKnownLeader].Call("ShardCtrler.Query", &args, &reply)
 			if ok && reply.WrongLeader == false {
 				return reply.Config
 			}
+			ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -60,13 +62,13 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	// Your code here.
 	args := JoinArgs{ck.clientId, atomic.AddInt64(&ck.commandId, 1), servers}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
+		for i := 0; i < len(ck.servers); i++ {
 			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", &args, &reply)
+			ok := ck.servers[ck.lastKnownLeader].Call("ShardCtrler.Join", &args, &reply)
 			if ok && reply.WrongLeader == false {
 				return
 			}
+			ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -76,14 +78,15 @@ func (ck *Clerk) Leave(gids []int) {
 	// Your code here.
 	args := LeaveArgs{ck.clientId, atomic.AddInt64(&ck.commandId, 1), gids}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
+		for i := 0; i < len(ck.servers); i++ {
 			var reply LeaveReply
-			ok := srv.Call("ShardCtrler.Leave", &args, &reply)
+			ok := ck.servers[ck.lastKnownLeader].Call("ShardCtrler.Leave", &args, &reply)
 			if ok && reply.WrongLeader == false {
 				return
 			}
+			ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 		}
+
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -92,14 +95,15 @@ func (ck *Clerk) Move(shard int, gid int) {
 	// Your code here.
 	args := MoveArgs{ck.clientId, atomic.AddInt64(&ck.commandId, 1), shard, gid}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
+		for i := 0; i < len(ck.servers); i++ {
 			var reply MoveReply
-			ok := srv.Call("ShardCtrler.Move", &args, &reply)
+			ok := ck.servers[ck.lastKnownLeader].Call("ShardCtrler.Move", &args, &reply)
 			if ok && reply.WrongLeader == false {
 				return
 			}
+			ck.lastKnownLeader = mathRand.Intn(len(ck.servers))
 		}
+
 		time.Sleep(100 * time.Millisecond)
 	}
 }
