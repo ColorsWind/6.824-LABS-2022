@@ -38,15 +38,6 @@ func (gil GroupItemList) Swap(i, j int) {
 	gil[j], gil[i] = gil[i], gil[j]
 }
 
-func initBalance(gids []int) (shards [NShards]int) {
-	shardsSorted := sort.IntSlice(shards[:])
-	// for deterministic
-	sort.Sort(shardsSorted)
-	for k := range shardsSorted {
-		shards[k] = gids[k%len(gids)]
-	}
-	return shards
-}
 func reBalance(items GroupItemList) (balancedItems GroupItemList) {
 	if len(items) == 0 {
 		return items

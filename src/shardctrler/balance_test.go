@@ -80,37 +80,6 @@ func TestReBalance(t *testing.T) {
 
 }
 
-func TestInitBalance(t *testing.T) {
-	rand.Seed(time.Now().UnixNano())
-	groupN := rand.Intn(NShards) + 1
-	log.Printf("Test groupN=%v.\n", groupN)
-	var shardsFirst [NShards]int
-	for x := 0; x < 10; x++ {
-		gids := make([]int, groupN)
-		for i := range gids {
-			gids[i] = i + 100
-		}
-		shards := initBalance(gids)
-
-		// check count, re-balance should not modify
-		gil := shardToGroupItemList(shards, nil)
-		gil = reBalance(gil)
-		shardsBalanced, _ := groupItemListToShard(gil)
-		if shards != shardsBalanced {
-			t.Errorf("init not balanced, %v != %v.", shards, shardsBalanced)
-		}
-
-		// check deterministic
-		if x > 0 {
-			if shards != shardsFirst {
-				t.Errorf("init not deterministic, %v != %v.", shards, shardsFirst)
-			}
-		} else {
-			shardsFirst = shards
-		}
-	}
-}
-
 func TestConvert(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	var shards [NShards]int
