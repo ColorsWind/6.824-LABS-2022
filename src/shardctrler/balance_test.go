@@ -93,7 +93,7 @@ func TestInitBalance(t *testing.T) {
 		shards := initBalance(gids)
 
 		// check count, re-balance should not modify
-		gil := shardToGroupItemList(shards, groupN)
+		gil := shardToGroupItemList(shards, nil)
 		gil = reBalance(gil)
 		shardsBalanced, _ := groupItemListToShard(gil)
 		if shards != shardsBalanced {
@@ -125,7 +125,7 @@ func TestConvert(t *testing.T) {
 		}
 		shards[shard] = gid
 	}
-	gil := shardToGroupItemList(shards, groupN)
+	gil := shardToGroupItemList(shards, nil)
 	xShards, xGroupN := groupItemListToShard(gil)
 	if !reflect.DeepEqual(shards, xShards) {
 		t.Errorf("shards: %v != %v, gil=%v.", shards, xShards, gil)

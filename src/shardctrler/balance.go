@@ -48,9 +48,6 @@ func initBalance(gids []int) (shards [NShards]int) {
 	return shards
 }
 func reBalance(items GroupItemList) (balancedItems GroupItemList) {
-	if len(items) > NShards {
-		log.Panicf("len of %v greater than %v.", items, NShards)
-	}
 	if len(items) == 0 {
 		return items
 	}
@@ -118,8 +115,12 @@ func reBalance(items GroupItemList) (balancedItems GroupItemList) {
 	return
 }
 
-func shardToGroupItemList(shards [NShards]int, groupN int) GroupItemList {
+// when LEAVE, need to pass gidList
+func shardToGroupItemList(shards [10]int, gidList []int) GroupItemList {
 	gidToShards := make(map[int][]int)
+	for _, gid := range gidList {
+		gidToShards[gid] = []int{}
+	}
 	for shard, gid := range shards {
 		gidToShards[gid] = append(gidToShards[gid], shard)
 	}

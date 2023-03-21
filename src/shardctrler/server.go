@@ -195,7 +195,7 @@ func (sc *ShardCtrler) handleReceiveMsg(msg raft.ApplyMsg) {
 				for gid, group := range cf.Groups {
 					servers[gid] = group
 				}
-				gil := shardToGroupItemList(cf.Shards, len(cf.Groups))
+				gil := shardToGroupItemList(cf.Shards, nil)
 				for gid, group := range command.Servers {
 					element, present := servers[gid]
 					if present {
@@ -232,8 +232,13 @@ func (sc *ShardCtrler) handleReceiveMsg(msg raft.ApplyMsg) {
 					delete(servers, gid)
 					leaveGidsMap[gid] = 1
 				}
+				var gidList []int
+				for gid, _ := range cf.Groups {
+					gidList = append(gidList, gid)
+				}
+
 				var gil GroupItemList
-				for _, item := range shardToGroupItemList(cf.Shards, len(cf.Groups)) {
+				for _, item := range shardToGroupItemList(cf.Shards, gidList) {
 					if _, present := leaveGidsMap[item.gid]; !present {
 						gil = append(gil, item)
 					}
