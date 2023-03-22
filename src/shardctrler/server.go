@@ -3,6 +3,7 @@ package shardctrler
 import (
 	"6.824/raft"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"sync/atomic"
@@ -155,6 +156,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	// Your code here.
 	sc.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
+	sc.logger.SetOutput(ioutil.Discard)
 	sc.clients = make(map[int64]*ClientHandler)
 	sc.lastAppliedCommandMap = make(map[int64]ExecutedOp)
 	sc.lastAppliedIndex = 0
@@ -346,19 +348,22 @@ func (sc *ShardCtrler) handleRequest(clientId int64, commandId int64, opType OpT
 		handler.err = WaitComplete
 
 		go func() {
-			for i := 0; true; i++ {
+			for i := 0; ; i++ {
 				time.Sleep(250 * time.Millisecond)
+				handler.mu.Lock()
+				finished := handler.finished
+				handler.mu.Unlock()
+				if finished == true {
+					return
+				}
 				if sc.killed() {
 					handler.mu.Lock()
-					if handler.finished == false {
-						sc.logger.Printf("%v: client handler killed, op=%v, handler=%v.\n",
-							sc.me, op, handler)
-						handler.err = ErrShutdown
-						handler.finished = true
-						handler.cond.Broadcast()
-					}
+					sc.logger.Printf("%v: client handler killed, op=%v, handler=%v.\n",
+						sc.me, op, handler)
+					handler.err = ErrShutdown
+					handler.finished = true
+					handler.cond.Broadcast()
 					handler.mu.Unlock()
-					return
 				}
 				currentTerm1, _ := sc.rf.GetState()
 				if currentTerm == currentTerm1 {
@@ -368,8 +373,8 @@ func (sc *ShardCtrler) handleRequest(clientId int64, commandId int64, opType OpT
 					sc.mu.Unlock()
 				} else {
 					sc.mu.Lock()
-					sc.logger.Printf("%v: client handler timeout, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
-						sc.me, currentTerm1, i, sc.lastAppliedCommandMap[clientId].CommandId, op, handler)
+					sc.logger.Printf("%v: client handler timeout, term changed(%v -> %v), i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
+						sc.me, currentTerm, currentTerm1, i, sc.lastAppliedCommandMap[clientId].CommandId, op, handler)
 					sc.mu.Unlock()
 					handler.mu.Lock()
 					handler.err = ErrWrongLeader
@@ -378,6 +383,7 @@ func (sc *ShardCtrler) handleRequest(clientId int64, commandId int64, opType OpT
 					handler.mu.Unlock()
 					return
 				}
+
 			}
 		}()
 	}

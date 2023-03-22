@@ -5,7 +5,6 @@ import (
 	"6.824/shardctrler"
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"sync/atomic"
@@ -101,29 +100,31 @@ func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType,
 		handler.cond = sync.NewCond(&handler.mu)
 		kv.clients[clientId] = handler
 	}
+	lastAppliedCommand, present := kv.lastAppliedCommandMap[clientId]
+	kv.mu.Unlock()
 	// if already finish
 	handler.mu.Lock()
 	defer handler.mu.Unlock()
-	lastAppliedCommand, present := kv.lastAppliedCommandMap[clientId]
+
 	if present && lastAppliedCommand.CommandId == commandId {
 		handler.result = lastAppliedCommand.Result
 		handler.err = OK
 		handler.finished = true
 		handler.cond.Broadcast()
-		kv.mu.Unlock()
 		return handler.result, handler.err
-	} else {
-		kv.mu.Unlock()
 	}
 
-	// if invalid command id
-	if handler.commandId > commandId {
-		kv.logger.Panicf("kvserver %v receive invalid id (handler.id=%v). client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.", kv.me, handler.commandId, clientId, commandId, opType, key, value, handler)
+	//// if invalid command id
+	//if handler.commandId > commandId {
+	//	kv.logger.Panicf("kvserver %v receive invalid id (handler.id=%v). client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.", kv.me, handler.commandId, clientId, commandId, opType, key, value, handler)
+	//}
+	// if outdate rpc
+	if commandId < handler.commandId || commandId < lastAppliedCommand.CommandId {
+		return "", ErrOutdatedRPC
 	}
 
-	// if not started
+	// if should retry
 	if handler.finished && handler.err != OK {
-		// should retry
 		op := Op{clientId, commandId, opType, key, value}
 		_, currentTerm, isLeader := kv.rf.Start(op)
 		if !isLeader {
@@ -132,39 +133,44 @@ func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType,
 		handler.finished = false
 		handler.err = WaitComplete
 
+		// check timeout
 		go func() {
-			for i := 0; true; i++ {
+			for i := 0; ; i++ {
 				time.Sleep(250 * time.Millisecond)
+				handler.mu.Lock()
+				finished := handler.finished
+				handler.mu.Unlock()
+				if finished == true {
+					return
+				}
 				if kv.killed() {
 					handler.mu.Lock()
-					if handler.finished == false {
-						kv.logger.Printf("%v: client handler killed, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
-							kv.me, clientId, commandId, opType, key, value, handler)
-						handler.err = ErrShutdown
-						handler.finished = true
-						handler.cond.Broadcast()
-					}
+					kv.logger.Printf("%v: client handler killed, op=%v, handler=%v.\n",
+						kv.me, op, handler)
+					handler.err = ErrShutdown
+					handler.finished = true
+					handler.cond.Broadcast()
 					handler.mu.Unlock()
-					return
 				}
 				currentTerm1, _ := kv.rf.GetState()
 				if currentTerm == currentTerm1 {
 					kv.mu.Lock()
-					kv.logger.Printf("%v: client handler continue to wait, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
-						kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
+					kv.logger.Printf("%v: client handler continue to wait, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
+						kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, op, handler)
 					kv.mu.Unlock()
 				} else {
 					kv.mu.Lock()
-					kv.logger.Printf("%v: client handler timeout, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
-						kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
+					kv.logger.Printf("%v: client handler timeout, term changed(%v -> %v), i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
+						kv.me, currentTerm, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, op, handler)
 					kv.mu.Unlock()
 					handler.mu.Lock()
-					handler.err = ErrApplySnapshot
+					handler.err = ErrWrongLeader
 					handler.finished = true
 					handler.cond.Broadcast()
 					handler.mu.Unlock()
 					return
 				}
+
 			}
 		}()
 	}
@@ -289,7 +295,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
-	kv.logger.SetOutput(ioutil.Discard)
+	//kv.logger.SetOutput(ioutil.Discard)
 
 	// You may need initialization code here.
 	kv.kvMap = make(map[string]string)
@@ -297,12 +303,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.lastAppliedCommandMap = make(map[int64]ExecutedOp)
 	kv.lastAppliedIndex = 0
 	kv.persister = persister
-	go func() {
-		for !kv.killed() {
-			msg := <-kv.applyCh
-			kv.handleApplyMsg(msg)
-		}
-	}()
 	go func() {
 		for !kv.killed() {
 			msg := <-kv.applyCh
@@ -346,10 +346,8 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 		// update state machine
 		result := ""
 		lastAppliedCommand := kv.lastAppliedCommandMap[command.ClientId]
-		if command.CommandId != lastAppliedCommand.CommandId && command.CommandId != lastAppliedCommand.CommandId+1 {
-			kv.logger.Panicf("%v receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", kv.me, msg, lastAppliedCommand.CommandId)
-		}
-		if command.CommandId == lastAppliedCommand.CommandId+1 {
+
+		if command.CommandId > lastAppliedCommand.CommandId {
 			switch command.Type {
 			case OpType_GET:
 				result = kv.kvMap[command.Key]
@@ -365,19 +363,24 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 			ec := ExecutedOp{command, result}
 			kv.logger.Printf("%v: update %v.\n", kv.me, ec)
 			kv.lastAppliedCommandMap[command.ClientId] = ec
-		} else {
+		} else if command.CommandId == lastAppliedCommand.CommandId {
 			result = lastAppliedCommand.Result
-		}
-		if result == "" && command.Type == OpType_GET {
-			//log.Printf("dump: rf=%v, kv=%v\n", kv.rf, kv)
+		} else {
+			kv.logger.Printf("%v receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", kv.me, msg, lastAppliedCommand.CommandId)
 		}
 
 		handler, present := kv.clients[command.ClientId]
-		if present && handler.commandId == command.CommandId {
+		if present && handler.commandId <= command.CommandId {
 			handler.mu.Lock()
-			handler.result = result
-			handler.err = OK
+			if handler.commandId == command.CommandId {
+				handler.result = result
+				handler.err = OK
+			} else {
+				handler.result = ""
+				handler.err = ErrOutdatedRPC
+			}
 			handler.finished = true
+			kv.logger.Printf("%v: make client handler finished, handler=%v.\n", kv.me, handler)
 			handler.cond.Broadcast()
 			handler.mu.Unlock()
 		}

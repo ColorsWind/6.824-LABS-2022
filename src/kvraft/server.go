@@ -136,39 +136,44 @@ func (kv *KVServer) handleRequest(clientId int64, commandId int64, opType OpType
 		handler.finished = false
 		handler.err = WaitComplete
 
+		// check timeout
 		go func() {
-			for i := 0; true; i++ {
+			for i := 0; ; i++ {
 				time.Sleep(250 * time.Millisecond)
+				handler.mu.Lock()
+				finished := handler.finished
+				handler.mu.Unlock()
+				if finished == true {
+					return
+				}
 				if kv.killed() {
 					handler.mu.Lock()
-					if handler.finished == false {
-						kv.logger.Printf("%v: client handler killed, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
-							kv.me, clientId, commandId, opType, key, value, handler)
-						handler.err = ErrShutdown
-						handler.finished = true
-						handler.cond.Broadcast()
-					}
+					kv.logger.Printf("%v: client handler killed, op=%v, handler=%v.\n",
+						kv.me, op, handler)
+					handler.err = ErrShutdown
+					handler.finished = true
+					handler.cond.Broadcast()
 					handler.mu.Unlock()
-					return
 				}
 				currentTerm1, _ := kv.rf.GetState()
 				if currentTerm == currentTerm1 {
 					kv.mu.Lock()
-					kv.logger.Printf("%v: client handler continue to wait, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
-						kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
+					kv.logger.Printf("%v: client handler continue to wait, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
+						kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, op, handler)
 					kv.mu.Unlock()
 				} else {
 					kv.mu.Lock()
-					kv.logger.Printf("%v: client handler timeout, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.\n",
-						kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, clientId, commandId, opType, key, value, handler)
+					kv.logger.Printf("%v: client handler timeout, term changed(%v -> %v), i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
+						kv.me, currentTerm, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, op, handler)
 					kv.mu.Unlock()
 					handler.mu.Lock()
-					handler.err = ErrApplySnapshot
+					handler.err = ErrWrongLeader
 					handler.finished = true
 					handler.cond.Broadcast()
 					handler.mu.Unlock()
 					return
 				}
+
 			}
 		}()
 	}
