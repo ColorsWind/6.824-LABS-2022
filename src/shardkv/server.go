@@ -17,9 +17,10 @@ import "6.824/labgob"
 type OpType string
 
 const (
-	OpType_GET    = "OpType_GET"
-	OpType_PUT    = "OpType_PUT"
-	OpType_APPEND = "OpType_APPEND"
+	OpType_GET         = "OpType_GET"
+	OpType_PUT         = "OpType_PUT"
+	OpType_APPEND      = "OpType_APPEND"
+	OpType_RECONFIGURE = "OpType_RECONFIGURE"
 )
 
 type Op struct {
@@ -31,10 +32,11 @@ type Op struct {
 	Type      OpType
 	Key       string
 	Value     string
+	Num       int
 }
 
 func (op Op) String() string {
-	return fmt.Sprintf("{client_id=%v, cmd_id=%v, type=%v, Key=%v, Value=%v}", op.ClientId, op.CommandId, op.Type, op.Key, op.Value)
+	return fmt.Sprintf("{client_id=%v, cmd_id=%v, type=%v, Key=%v, Value=%v, Num=%v}", op.ClientId, op.CommandId, op.Type, op.Key, op.Value, op.Num)
 }
 
 type ExecutedOp struct {
@@ -85,6 +87,20 @@ type ShardKV struct {
 	clients               map[int64]*ClientHandler
 
 	lastAppliedIndex int
+	config           shardctrler.Config
+}
+
+func (kv *ShardKV) handleConfigurationPoll() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		return
+	}
+	cf := kv.mck.Query(-1)
+	if cf.Num != kv.config.Num {
+		kv.rf.Start(Op{-1, -1, OpType_RECONFIGURE, "", "", cf.Num})
+	}
 }
 
 func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType, key string, value string) (result string, err Err) {
@@ -125,7 +141,7 @@ func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType,
 
 	// if should retry
 	if handler.finished && handler.err != OK {
-		op := Op{clientId, commandId, opType, key, value}
+		op := Op{clientId, commandId, opType, key, value, -1}
 		_, currentTerm, isLeader := kv.rf.Start(op)
 		if !isLeader {
 			return "", ErrWrongLeader
@@ -291,6 +307,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
+	kv.config = kv.mck.Query(-1)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -307,6 +324,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		for !kv.killed() {
 			msg := <-kv.applyCh
 			kv.handleApplyMsg(msg)
+		}
+	}()
+	go func() {
+		for !kv.killed() {
+			t1 := time.Now().UnixMilli()
+			kv.handleConfigurationPoll()
+			t2 := time.Now().UnixMilli()
+			time.Sleep(time.Duration(100-(t2-t1)) * time.Millisecond)
 		}
 	}()
 	return kv
@@ -355,6 +380,9 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 				kv.kvMap[command.Key] = command.Value
 			case OpType_APPEND:
 				kv.kvMap[command.Key] = kv.kvMap[command.Key] + command.Value
+			case OpType_RECONFIGURE:
+				kv.logger.Printf("%v: try to reconfigure %v\n", kv.me, command.Num)
+				kv.config = kv.mck.Query(command.Num)
 			default:
 				kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
 			}

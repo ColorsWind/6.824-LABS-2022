@@ -279,6 +279,9 @@ func (sc *ShardCtrler) handleReceiveMsg(msg raft.ApplyMsg) {
 				// or Move RPC that the shardctrler finished handling before it received the Query(-1) RPC.
 				if command.Num == -1 || command.Num >= len(sc.configs) {
 					result = cf
+					if command.Num >= len(sc.configs) {
+						sc.logger.Printf("%v: receive get config num %v, but not hold. configs=%v\n", sc.me, command.Num, sc.configs)
+					}
 				} else {
 					result = sc.configs[command.Num]
 				}
