@@ -91,22 +91,17 @@ func (handler *ClientHandler) String() string {
 	return fmt.Sprintf("{client_id=%v, cmd_id=%v, finished=%v, result=%v, err=%v}", handler.clientId, handler.commandId, handler.finished, handler.result, handler.err)
 }
 
-func newClientHandler(clientId int64, commandId int64) *ClientHandler {
-	handler := ClientHandler{
-		clientId:  clientId,
-		commandId: commandId,
-		err:       ErrNotStarted,
-		finished:  true,
-	}
-	handler.cond = sync.NewCond(&handler.mu)
-	return &handler
-}
-
 func (kv *KVServer) handleRequest(clientId int64, commandId int64, opType OpType, key string, value string) (result string, err Err) {
 	kv.mu.Lock()
 	handler, present := kv.clients[clientId]
 	if !present || handler.commandId < commandId {
-		handler = newClientHandler(clientId, commandId)
+		handler = &ClientHandler{
+			clientId:  clientId,
+			commandId: commandId,
+			err:       ErrNotStarted,
+			finished:  true,
+		}
+		handler.cond = sync.NewCond(&handler.mu)
 		kv.clients[clientId] = handler
 	}
 

@@ -19,6 +19,13 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
+
+	WaitComplete     = "WaitComplete"
+	ErrOutdatedRPC   = "ErrOutdatedRPC"
+	ErrApplySnapshot = "ErrApplySnapshot"
+	ErrTimeout       = "ErrTimeout"
+	ErrNotStarted    = "ErrNotStarted"
+	ErrShutdown      = "ErrShutdown"
 )
 
 type Err string
