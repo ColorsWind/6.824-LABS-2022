@@ -84,7 +84,8 @@ type ShardKV struct {
 	// Your definitions here.
 	kvMap                 map[string]string
 	lastAppliedCommandMap map[int64]ExecutedOp
-	clients               map[int64]*ClientHandler
+	handlerByClientId     map[int64]*ClientHandler                      // only handleRequest will be able to modify
+	handlerByShard        [shardctrler.NShards]map[int64]*ClientHandler // only handleRequest will be able to modify
 
 	lastAppliedIndex int
 	config           shardctrler.Config
@@ -101,11 +102,16 @@ func (kv *ShardKV) handleConfigurationPoll() {
 	if cf.Num != kv.config.Num {
 		kv.rf.Start(Op{-1, -1, OpType_RECONFIGURE, "", "", cf.Num})
 	}
+	// TODO: save config num to prevent duplicate `Start`
 }
 
 func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType, key string, value string) (result string, err Err) {
 	kv.mu.Lock()
-	handler, present := kv.clients[clientId]
+	if kv.config.Shards[key2shard(key)] != kv.gid {
+		kv.mu.Unlock()
+		return "", ErrWrongGroup
+	}
+	handler, present := kv.handlerByClientId[clientId]
 	if !present || handler.commandId < commandId {
 		handler = &ClientHandler{
 			clientId:  clientId,
@@ -114,7 +120,8 @@ func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType,
 			finished:  true,
 		}
 		handler.cond = sync.NewCond(&handler.mu)
-		kv.clients[clientId] = handler
+		kv.handlerByClientId[clientId] = handler
+		kv.handlerByShard[key2shard(key)][clientId] = handler
 	}
 	lastAppliedCommand, present := kv.lastAppliedCommandMap[clientId]
 	kv.mu.Unlock()
@@ -316,10 +323,15 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	// You may need initialization code here.
 	kv.kvMap = make(map[string]string)
-	kv.clients = make(map[int64]*ClientHandler)
+	kv.handlerByClientId = make(map[int64]*ClientHandler)
 	kv.lastAppliedCommandMap = make(map[int64]ExecutedOp)
 	kv.lastAppliedIndex = 0
 	kv.persister = persister
+
+	for k := range kv.handlerByShard {
+		kv.handlerByShard[k] = make(map[int64]*ClientHandler)
+	}
+
 	go func() {
 		for !kv.killed() {
 			msg := <-kv.applyCh
@@ -354,7 +366,7 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 		kv.kvMap = kvMap
 		kv.lastAppliedIndex = msg.SnapshotIndex
 		for _, command := range lastAppliedCommandMap {
-			handler, present := kv.clients[command.ClientId]
+			handler, present := kv.handlerByClientId[command.ClientId]
 			if present && handler.commandId == command.CommandId {
 				handler.mu.Lock()
 				handler.result = command.Result
@@ -371,8 +383,32 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 		// update state machine
 		result := ""
 		lastAppliedCommand := kv.lastAppliedCommandMap[command.ClientId]
+		if command.Type == OpType_RECONFIGURE && command.Num != kv.config.Num {
+			kv.logger.Printf("%v: try to reconfigure %v\n", kv.me, command.Num)
+			cf := kv.mck.Query(command.Num)
+			for shard := 0; shard < shardctrler.NShards; shard++ {
+				if kv.config.Shards[shard] == kv.gid && cf.Shards[shard] != kv.gid {
+					// lost ownership of `shard`, stop process immediately
+					kv.logger.Printf("%v: lost ownership of %v, remove: %v.\n", kv.me, shard, kv.handlerByShard)
+					for _, handler := range kv.handlerByShard[shard] {
+						handler.mu.Lock()
+						if !handler.finished || handler.err != OK {
+							handler.finished = true
+							handler.err = ErrWrongGroup
+						}
+						handler.cond.Broadcast()
+						handler.mu.Unlock()
+					}
+					kv.handlerByShard[shard] = make(map[int64]*ClientHandler)
+				} else if kv.config.Shards[shard] != kv.gid && cf.Shards[shard] == kv.gid {
+					// gain ownership of `shard`, get
+					kv.logger.Printf("%v: gain ownership of %v.\n", kv.me, shard)
 
-		if command.CommandId > lastAppliedCommand.CommandId {
+					// TODO: get state from `kv.config.Shards[shard]`
+				}
+			}
+			kv.config = cf
+		} else if command.CommandId > lastAppliedCommand.CommandId {
 			switch command.Type {
 			case OpType_GET:
 				result = kv.kvMap[command.Key]
@@ -381,8 +417,7 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 			case OpType_APPEND:
 				kv.kvMap[command.Key] = kv.kvMap[command.Key] + command.Value
 			case OpType_RECONFIGURE:
-				kv.logger.Printf("%v: try to reconfigure %v\n", kv.me, command.Num)
-				kv.config = kv.mck.Query(command.Num)
+				break
 			default:
 				kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
 			}
@@ -397,7 +432,7 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 			kv.logger.Printf("%v receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", kv.me, msg, lastAppliedCommand.CommandId)
 		}
 
-		handler, present := kv.clients[command.ClientId]
+		handler, present := kv.handlerByClientId[command.ClientId]
 		if present && handler.commandId <= command.CommandId {
 			handler.mu.Lock()
 			if handler.commandId == command.CommandId {

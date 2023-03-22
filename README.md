@@ -5,7 +5,7 @@
 - [x] Lab 1: MapReduce
 - [x] Lab 2: Raft
 - [x] Lab 3: Fault-tolerant Key/Value Service
-- [ ] Lab 4: ???
+- [ ] Lab 4: Sharded Key/Value Service
 
 ## Lab1  MapReduce
 
@@ -70,3 +70,11 @@
 2. 重新设计数据结构：
    1. clientRequest map[client_id] request_handler **volatile**
    2. lastAppliedCommand map[client_id] command **persistent**
+
+
+
+**Lab 4: Sharded Key/Value Service**
+
+*4B*
+
+1. 要求提到：当shardkv发现失去shard的ownership之后要**立即**停止处理客户端请求，因为Group可能发现故障无法达成共识，客户端也可能在reply丢失的情况下新的Group请求，
