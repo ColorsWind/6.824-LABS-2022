@@ -2,6 +2,7 @@ package shardkv
 
 import (
 	"6.824/raft"
+	"6.824/shardctrler"
 	"fmt"
 )
 
@@ -81,10 +82,11 @@ type GetStateArgs struct {
 	ClientId  int64
 	CommandId int64
 	Shards    []int
+	Config    shardctrler.Config
 }
 
 func (args GetStateArgs) String() string {
-	return fmt.Sprintf("{shards=%v, client_id=%v, cmd_id=%v}", args.Shards, args.ClientId, args.CommandId)
+	return fmt.Sprintf("{shards=%v, client_id=%v, cmd_id=%v, config=%v}", args.Shards, args.ClientId, args.CommandId, args.Config)
 }
 
 type GetStateReply struct {

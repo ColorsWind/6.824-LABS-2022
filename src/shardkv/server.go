@@ -33,7 +33,7 @@ type Op struct {
 	Type      OpType
 	Key       string             // OpType_GET | OpType_PUT | OpType_APPEND
 	Value     string             // OpType_PUT | OpType_APPEND
-	Config    shardctrler.Config // OpType_RECONFIGURE
+	Config    shardctrler.Config // OpType_RECONFIGURE | OpType_GET_STATE
 	Shards    []int              // OpType_GET_STATE
 }
 
@@ -101,9 +101,9 @@ type ShardKV struct {
 	commandId int64
 }
 
-func (kv *ShardKV) GetStateWithLock(gid int, shards []int) (kvMap map[string]string, lastAppliedMap map[int64]ExecutedOp) {
+func (kv *ShardKV) getStateFromGroup(gid int, shards []int, config shardctrler.Config) (kvMap map[string]string, lastAppliedMap map[int64]ExecutedOp) {
 	kv.logger.Printf("%v: GetState. gid=%v, shards=%v.\n", kv.me, gid, shards)
-	args := GetStateArgs{kv.clientId, atomic.AddInt64(&kv.commandId, 1), shards}
+	args := GetStateArgs{kv.clientId, atomic.AddInt64(&kv.commandId, 1), shards, config}
 	for {
 		//gid := kv.config.Shards[shard]
 		if servers, ok := kv.config.Groups[gid]; ok {
@@ -433,7 +433,9 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 		var getStateKVMap map[string]string
 		var getStateAppliedMap map[int64]ExecutedOp
 		lastAppliedCommand := kv.lastAppliedCommandMap[command.ClientId]
-		if command.Type == OpType_RECONFIGURE && command.Config.Num != kv.config.Num {
+
+		if (command.Type == OpType_RECONFIGURE || command.Type == OpType_GET_STATE) && command.Config.Num > kv.config.Num {
+			// command contain config and should try to re-configure
 			kv.logger.Printf("%v: try to reconfigure %v\n", kv.me, command.Config.Num)
 			gid2shards := make(map[int][]int)
 			for shard := 0; shard < shardctrler.NShards; shard++ {
@@ -459,7 +461,10 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 				}
 				// get state from other group
 				for gid, shards := range gid2shards {
-					kvMap1, lastAppliedMap1 := kv.GetStateWithLock(gid, shards)
+					// in case that two group exchange shard ownership may try to get state of each other
+					kv.mu.Unlock()
+					kvMap1, lastAppliedMap1 := kv.getStateFromGroup(gid, shards, command.Config)
+					kv.mu.Lock()
 					for key, value := range kvMap1 {
 						getStateKVMap[key] = value
 					}
@@ -469,7 +474,8 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 				}
 			}
 			kv.config = command.Config
-		} else if command.CommandId > lastAppliedCommand.CommandId {
+		}
+		if command.CommandId > lastAppliedCommand.CommandId {
 			switch command.Type {
 			case OpType_GET:
 				result = kv.kvMap[command.Key]
