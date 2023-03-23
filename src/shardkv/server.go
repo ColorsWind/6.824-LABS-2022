@@ -31,14 +31,14 @@ type Op struct {
 	ClientId  int64
 	CommandId int64
 	Type      OpType
-	Key       string // OpType_GET | OpType_PUT | OpType_APPEND
-	Value     string // OpType_PUT | OpType_APPEND
-	Num       int    // OpType_RECONFIGURE
-	Shards    []int  // OpType_GET_STATE
+	Key       string             // OpType_GET | OpType_PUT | OpType_APPEND
+	Value     string             // OpType_PUT | OpType_APPEND
+	Config    shardctrler.Config // OpType_RECONFIGURE
+	Shards    []int              // OpType_GET_STATE
 }
 
 func (op Op) String() string {
-	return fmt.Sprintf("{client_id=%v, cmd_id=%v, type=%v, Key=%v, Value=%v, Num=%v, Shards=%v}", op.ClientId, op.CommandId, op.Type, op.Key, op.Value, op.Num, op.Shards)
+	return fmt.Sprintf("{client_id=%v, cmd_id=%v, type=%v, Key=%v, Value=%v, Num=%v, Shards=%v}", op.ClientId, op.CommandId, op.Type, op.Key, op.Value, op.Config, op.Shards)
 }
 
 type ExecutedOp struct {
@@ -137,7 +137,7 @@ func (kv *ShardKV) handleConfigurationPoll() {
 	}
 	cf := kv.mck.Query(-1)
 	if cf.Num != kv.config.Num {
-		kv.rf.Start(Op{-1, -1, OpType_RECONFIGURE, "", "", cf.Num, []int{}})
+		kv.rf.Start(Op{-1, -1, OpType_RECONFIGURE, "", "", cf, []int{}})
 	}
 	// TODO: save config num to prevent duplicate `Start`
 }
@@ -185,7 +185,7 @@ func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType,
 
 	// if should retry
 	if handler.finished && handler.err != OK {
-		op := Op{clientId, commandId, opType, key, value, -1, shard}
+		op := Op{clientId, commandId, opType, key, value, shardctrler.Config{}, shard}
 		_, currentTerm, isLeader := kv.rf.Start(op)
 		if !isLeader {
 			return "", nil, nil, ErrWrongLeader
@@ -433,13 +433,12 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 		var getStateKVMap map[string]string
 		var getStateAppliedMap map[int64]ExecutedOp
 		lastAppliedCommand := kv.lastAppliedCommandMap[command.ClientId]
-		if command.Type == OpType_RECONFIGURE && command.Num != kv.config.Num {
-			kv.logger.Printf("%v: try to reconfigure %v\n", kv.me, command.Num)
-			cf := kv.mck.Query(command.Num)
+		if command.Type == OpType_RECONFIGURE && command.Config.Num != kv.config.Num {
+			kv.logger.Printf("%v: try to reconfigure %v\n", kv.me, command.Config.Num)
 			gid2shards := make(map[int][]int)
 			for shard := 0; shard < shardctrler.NShards; shard++ {
 				prevShardGid := kv.config.Shards[shard]
-				currShardGid := cf.Shards[shard]
+				currShardGid := command.Config.Shards[shard]
 				if prevShardGid == kv.gid && currShardGid != kv.gid {
 					// lost ownership of `shard`, stop process immediately
 					kv.logger.Printf("%v: lost ownership of %v, remove: %v.\n", kv.me, shard, kv.handlerByShard)
@@ -469,7 +468,7 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 					}
 				}
 			}
-			kv.config = cf
+			kv.config = command.Config
 		} else if command.CommandId > lastAppliedCommand.CommandId {
 			switch command.Type {
 			case OpType_GET:
