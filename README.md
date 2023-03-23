@@ -77,4 +77,4 @@
 
 *4B*
 
-1. 要求提到：当shardkv发现失去shard的ownership之后要**立即**停止处理客户端请求，因为Group可能发现故障无法达成共识，客户端也可能在reply丢失的情况下新的Group请求，
+1. 要求提到：当shardkv发现失去shard的ownership之后要**立即**停止处理客户端请求，因为Group可能发现故障无法达成共识，客户端也可能在reply丢失的情况下新的Group请求。更重要的是，新的Group可能开始处理客户端请求。

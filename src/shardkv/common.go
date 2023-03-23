@@ -76,3 +76,23 @@ type GetReply struct {
 func (reply GetReply) String() string {
 	return fmt.Sprintf("{Err=%v, Value=%v}", reply.Err, raft.ToStringLimited(reply.Value, 10))
 }
+
+type GetStateArgs struct {
+	ClientId  int64
+	CommandId int64
+	Shards    []int
+}
+
+func (args GetStateArgs) String() string {
+	return fmt.Sprintf("{shards=%v, client_id=%v, cmd_id=%v}", args.Shards, args.ClientId, args.CommandId)
+}
+
+type GetStateReply struct {
+	KVMap                 map[string]string
+	LastAppliedCommandMap map[int64]ExecutedOp
+	Err                   Err
+}
+
+func (reply GetStateReply) String() string {
+	return fmt.Sprintf("{kvMap=%v, lastAppliedCommandMap=%v, err=%v}", reply.KVMap, reply.LastAppliedCommandMap, reply.Err)
+}
