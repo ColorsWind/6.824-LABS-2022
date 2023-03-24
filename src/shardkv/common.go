@@ -16,10 +16,11 @@ import (
 //
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrWrongLeader = "ErrWrongLeader"
+	OK                 = "OK"
+	ErrNoKey           = "ErrNoKey"
+	ErrWrongGroup      = "ErrWrongGroup"
+	ErrWrongLeader     = "ErrWrongLeader"
+	ErrNotAvailableYet = "ErrNotAvailableYet"
 
 	WaitComplete     = "WaitComplete"
 	ErrOutdatedRPC   = "ErrOutdatedRPC"
@@ -86,7 +87,7 @@ type GetStateArgs struct {
 }
 
 func (args GetStateArgs) String() string {
-	return fmt.Sprintf("{shards=%v, client_id=%v, cmd_id=%v, config=%v}", args.Shards, args.ClientId, args.CommandId, args.Config)
+	return fmt.Sprintf("{shards=%v, client_id=%v, cmd_id=%v, ctrlerConfig=%v}", args.Shards, args.ClientId, args.CommandId, args.Config)
 }
 
 type GetStateReply struct {
