@@ -119,7 +119,7 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 							return
 						}
 						if ok && reply.Err.isDeterministic() {
-							args.CommandId = atomic.AddInt64(&ck.commandId, 1)
+							//args.CommandId = atomic.AddInt64(&ck.commandId, 1)
 							break
 						}
 						// ... not ok, or ErrWrongLeader

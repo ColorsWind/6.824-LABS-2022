@@ -541,7 +541,11 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 
 			}
 			lastAppliedCommand = NewExecuteOp(command, result)
-			kv.LastAppliedCommandMap[command.ClientId] = lastAppliedCommand
+			if _, containsErr := result.(Err); !containsErr {
+				kv.LastAppliedCommandMap[command.ClientId] = lastAppliedCommand
+				// only successfully command need to deduplicate
+			}
+
 		} else if command.CommandId == lastAppliedCommand.CommandId {
 			//result = lastAppliedCommand.Result
 		} else {
