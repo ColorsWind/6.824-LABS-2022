@@ -128,7 +128,7 @@ func (kv *ShardKV) handleRequest(identity Identity, opType OpType, extraArgs Ext
 			// clerk will only send one request at a time
 			kv.logger.Panicf("%v-%v: request will not complete, identity=%v, opType=%v, extraArgs=%v, lastAppliedCommand=%v, handler=%v.\n", kv.gid, kv.me, identity, opType, extraArgs, lastAppliedCommand, handler)
 		case OpType_RECONFIGURED, OpType_RECONFIGURING:
-			//kv.logger.Printf("%v-%v: configure request outdated, identity=%v, opType=%v, extraArgs=%v, lastAppliedCommand=%v, handler=%v.\n", kv.gid, kv.me, identity, opType, extraArgs, lastAppliedCommand, handler)
+			kv.logger.Printf("%v-%v: configure request outdated, identity=%v, opType=%v, extraArgs=%v, lastAppliedCommand=%v, handler=%v.\n", kv.gid, kv.me, identity, opType, extraArgs, lastAppliedCommand, handler)
 		}
 		err = ErrOutdatedRPC
 		return
@@ -345,7 +345,7 @@ func (kv *ShardKV) decodeState(data []byte) (config shardctrler.Config, state St
 // RPCs to the shardctrler.
 //
 // make_end(servername) turns a server name from a
-// Config.Groups[gid][i] into a labrpc.ClientEnd on which you can
+// LastConfig.Groups[gid][i] into a labrpc.ClientEnd on which you can
 // send RPCs. You'll need this to send RPCs to other groups.
 //
 // look at client.go for examples of how to use ctrlers[]
@@ -476,7 +476,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 				shardMap := make(map[int]int)
 				noRace := true
 				for _, shard := range shards {
-					if kv.config.Shards[shard] == kv.me {
+					if kv.config.Shards[shard] == kv.gid {
 						log.Printf("%v-%v: receive GetState msg, but it still owns shard %v, ctrlerConfig=%v.", kv.gid, kv.me, shard, kv.config)
 						noRace = false
 						break
@@ -492,7 +492,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 					for key, value := range kv.LastAppliedCommandMap {
 						switch value.Type {
 						case OpType_GET:
-							if _, present := shardMap[key2shard(value.ExtraArgs.(string))]; present {
+							if _, present := shardMap[key2shard(value.ExtraArgs.(KeyValue).Key)]; present {
 								getStateAppliedMap[key] = value
 							}
 						case OpType_PUT, OpType_APPEND:

@@ -18,9 +18,7 @@ import (
 const (
 	OK                  = Err("OK")
 	ErrNoKey            = Err("ErrNoKey")
-	ErrWrongGroup       = Err("ErrWrongGroup")
 	ErrWrongLeader      = Err("ErrWrongLeader")
-	ErrNotAvailableYet  = Err("ErrNotAvailableYet")
 	ErrMatchConfiguring = Err("ErrMatchConfiguring")
 	ErrMatchConfigured  = Err("ErrMatchConfigured")
 
@@ -31,9 +29,21 @@ const (
 	ErrTimeout        = Err("ErrTimeout")
 	ErrNotStarted     = Err("ErrNotStarted")
 	ErrShutdown       = Err("ErrShutdown")
+
+	ErrWrongGroup      = Err("ErrWrongGroup")
+	ErrNotAvailableYet = Err("ErrNotAvailableYet")
 )
 
 type Err string
+
+func (err Err) isDeterministic() bool {
+	switch err {
+	case ErrWrongGroup, ErrNotAvailableYet, ErrGetStateRacing, ErrMatchConfiguring, ErrMatchConfigured:
+		return true
+	default:
+		return false
+	}
+}
 
 type Identity struct {
 	ClientId  int64
@@ -138,7 +148,7 @@ type ReConfiguringReply struct {
 }
 
 func (reply ReConfiguringReply) String() string {
-	return fmt.Sprintf("{config=%v, Err=%v}", reply.LastConfig, reply.Err)
+	return fmt.Sprintf("{lastConfig=%v, Err=%v}", reply.LastConfig, reply.Err)
 }
 
 type ReConfiguredArgs struct {

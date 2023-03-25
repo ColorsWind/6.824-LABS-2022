@@ -56,7 +56,7 @@ type Clerk struct {
 // ctrlers[] is needed to call shardctrler.MakeClerk().
 //
 // make_end(servername) turns a server name from a
-// Config.Groups[gid][i] into a labrpc.ClientEnd on which you can
+// LastConfig.Groups[gid][i] into a labrpc.ClientEnd on which you can
 // send RPCs.
 //
 func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *Clerk {
@@ -91,7 +91,7 @@ func (ck *Clerk) Get(key string) string {
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
+				if ok && reply.Err.isDeterministic() {
 					// known reject, increase command id and retry
 					args.CommandId = atomic.AddInt64(&ck.commandId, 1)
 					break
@@ -125,7 +125,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				if ok && reply.Err == OK {
 					return
 				}
-				if ok && reply.Err == ErrWrongGroup {
+				if ok && reply.Err.isDeterministic() {
 					args.CommandId = atomic.AddInt64(&ck.commandId, 1)
 					break
 				}
