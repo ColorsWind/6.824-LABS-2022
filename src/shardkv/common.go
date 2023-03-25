@@ -64,13 +64,13 @@ func (kv KeyValue) String() string {
 }
 
 type State struct {
-	ConfigNum             int
+	ConfiguredNum         int
 	KVMap                 map[string]string
 	LastAppliedCommandMap map[int64]ExecutedOp
 }
 
 func (st State) String() string {
-	return fmt.Sprintf("kvMap=%v, lastAppliedCommandMap=%v", st.KVMap, st.LastAppliedCommandMap)
+	return fmt.Sprintf("num=%v, kvMap=%v, lastAppliedCommandMap=%v", st.ConfiguredNum, st.KVMap, st.LastAppliedCommandMap)
 }
 
 // Put or Append

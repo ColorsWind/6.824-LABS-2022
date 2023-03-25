@@ -46,7 +46,7 @@ func MakeConfigureClerk(kv *ShardKV) *ConfigureClerk {
 }
 
 func (ck *ConfigureClerk) onPollConfiguration() {
-	config := ck.mck.Query(-1)
+	config := ck.mck.Query(ck.configuringNum + 1)
 	//ck.logger.Printf("%v-%v: queried config: %v.\n", ck.gid, ck.me, config)
 	if config.Num < ck.configuringNum {
 		ck.logger.Panicf("%v-%v: config.Num < ck.conf.LastConfig.Num, something went wrong, query_config=%v, conf=%v\n", ck.gid, ck.me, config, ck.configuringNum)
@@ -63,8 +63,21 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 		}
 		return
 	}
-	ck.configuringNum = config.Num
-	ck.logger.Printf("%v-%v: update last known configuring config num to %v.\n", ck.gid, ck.me, ck.configuringNum)
+	if lastConfig.Num > config.Num {
+		ck.logger.Printf("%v-%v: do Re-Configuring done nothing, shardkv is newer, lastConfig=%v, queryConfig=%v.\n", ck.gid, ck.me, lastConfig, config)
+		ck.configuringNum = lastConfig.Num
+		return
+	} else if lastConfig.Num == config.Num {
+		ck.logger.Printf("%v-%v: do Re-Configuring done nothing, shardkv is up-to-date, try Re-Configured, lastConfig=%v, queryConfig=%v.\n", ck.gid, ck.me, lastConfig, config)
+	} else if lastConfig.Num+1 == config.Num {
+		ck.logger.Printf("%v-%v: update last known configuring config num to %v.\n", ck.gid, ck.me, ck.configuringNum)
+		ck.configuringNum = config.Num
+	} else {
+		// lastConfig.Num < config.Num
+		ck.configuringNum = lastConfig.Num
+		ck.logger.Panicf("%v-%v: do Re-Configuring done nothing, shardkv is too old, maybe there is a bug. lastConfig=%v, queryConfig=%v.\n", ck.gid, ck.me, lastConfig, config)
+		return
+	}
 
 	gid2shards := make(map[int][]int)
 	for shard := range lastConfig.Shards {

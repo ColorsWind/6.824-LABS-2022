@@ -375,8 +375,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	atomic.StoreInt32(&kv.dead, 0)
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
-	kv.ConfigNum = 0
-	kv.config = kv.mck.Query(kv.ConfigNum)
+	kv.ConfiguredNum = 0
+	kv.config = kv.mck.Query(kv.ConfiguredNum)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -451,7 +451,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			case OpType_GET, OpType_PUT, OpType_APPEND:
 				keyValue := command.ExtraArgs.(KeyValue)
 				keyShard := key2shard(keyValue.Key)
-				if kv.ConfigNum != kv.config.Num {
+				if kv.ConfiguredNum != kv.config.Num {
 					// TODO: make a list of affected Shard
 					result = ErrNotAvailableYet
 					kv.logger.Printf("%v-%v: current configuring, unable to handle command: %v.\n", kv.gid, kv.me, command)
@@ -511,26 +511,29 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 				}
 			case OpType_RECONFIGURING:
 				newConfig := command.ExtraArgs.(shardctrler.Config)
-				if kv.config.Num < newConfig.Num {
+				if kv.config.Num >= newConfig.Num {
+					kv.logger.Printf("%v-%v: current config is as least up-to-date, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
+					result = kv.config
+				} else if kv.config.Num+1 == newConfig.Num {
 					result = kv.config
 					kv.config = newConfig
 					kv.config = command.ExtraArgs.(shardctrler.Config)
 					kv.logger.Printf("%v-%v: update current config, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
 				} else {
-					kv.logger.Printf("%v-%v: current config is as least up-to-date, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
-					result = ErrMatchConfiguring
+					result = kv.config
+					kv.logger.Printf("%v-%v: request config is too new, expect new_num = curr_num + 1, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
 				}
 			case OpType_RECONFIGURED:
 				state := command.ExtraArgs.(State)
-				if kv.config.Num == state.ConfigNum {
-					kv.ConfigNum = state.ConfigNum
+				if kv.config.Num == state.ConfiguredNum && kv.ConfiguredNum != state.ConfiguredNum {
+					kv.ConfiguredNum = state.ConfiguredNum
 					for key, value := range state.KVMap {
 						kv.KVMap[key] = value
 					}
 					for key, value := range state.LastAppliedCommandMap {
 						kv.LastAppliedCommandMap[key] = value
 					}
-					kv.logger.Printf("%v-%v: update configNum to %v.\n", kv.gid, kv.me, state.ConfigNum)
+					kv.logger.Printf("%v-%v: update configNum to %v.\n", kv.gid, kv.me, state.ConfiguredNum)
 				} else {
 					kv.logger.Printf("%v-%v: config not match. state=%v, config=%v.\n", kv.gid, kv.me, state, kv.config)
 					result = ErrMatchConfigured
@@ -546,7 +549,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 		}
 
 		handler, present := kv.handlerByClientId[command.ClientId]
-		if present && handler.commandId >= command.CommandId {
+		if present && command.CommandId >= handler.commandId {
 			handler.mu.Lock()
 			if handler.commandId == command.CommandId {
 				handler.result = lastAppliedCommand.Result
