@@ -541,9 +541,6 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			kv.LastAppliedCommandMap[command.ClientId] = lastAppliedCommand
 		} else if command.CommandId == lastAppliedCommand.CommandId {
 			//result = lastAppliedCommand.Result
-		} else if command.Type == OpType_RECONFIGURED || command.Type == OpType_RECONFIGURING {
-			// command.CommandId < lastAppliedCommand.CommandId
-			lastAppliedCommand = NewExecuteOp(command, ErrOutdatedRPC)
 		} else {
 			kv.logger.Panicf("%v-%v: receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", kv.gid, kv.me, msg, lastAppliedCommand.CommandId)
 		}

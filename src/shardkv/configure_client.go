@@ -16,14 +16,15 @@ type ConfigureClerk struct {
 	mck      *shardctrler.Clerk
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
-	clientId       int64 // random id, should be unique globally
-	commandId      int64 // for a client, monotonically increase from 0
-	logger         *log.Logger
-	kv             *ShardKV
-	me             int
-	gid            int
-	configuringNum int
-	configuredNum  int
+	getStateClientId  int64 // random id, should be unique globally
+	configureClientId int64
+	commandId         int64 // for a client, monotonically increase from 0
+	logger            *log.Logger
+	kv                *ShardKV
+	me                int
+	gid               int
+	configuringNum    int
+	configuredNum     int
 }
 
 func MakeConfigureClerk(kv *ShardKV) *ConfigureClerk {
@@ -33,7 +34,8 @@ func MakeConfigureClerk(kv *ShardKV) *ConfigureClerk {
 	ck.kv = kv
 	ck.mck = shardctrler.MakeClerk(kv.ctrlers)
 	ck.make_end = kv.make_end
-	ck.clientId = nrand()
+	ck.getStateClientId = nrand()
+	ck.configureClientId = nrand()
 	atomic.StoreInt64(&ck.commandId, 0)
 	ck.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
 	ck.me = kv.me
@@ -81,7 +83,7 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 	for gid, shards := range gid2shards {
 		func() {
 			ck.logger.Printf("%v-%v: GetState. gid=%v, shards=%v.\n", ck.gid, ck.me, gid, shards)
-			args := GetStateArgs{Identity{ck.clientId, atomic.AddInt64(&ck.commandId, 1)}, shards}
+			args := GetStateArgs{Identity{ck.getStateClientId, atomic.AddInt64(&ck.commandId, 1)}, shards}
 			for {
 				//gid := kv.ctrlerConfig.Shards[shard]
 				if servers, ok := lastConfig.Groups[gid]; ok {
@@ -129,7 +131,7 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 
 func (ck *ConfigureClerk) sendReConfiguring(config shardctrler.Config) (lastConfig shardctrler.Config, err Err) {
 	args := ReConfiguringArgs{
-		Identity: Identity{int64(ck.gid), int64(1 + config.Num*2)},
+		Identity: Identity{ck.configureClientId, int64(1 + config.Num*2)},
 		Config:   config,
 	}
 	reply := ReConfiguringReply{}
@@ -139,7 +141,7 @@ func (ck *ConfigureClerk) sendReConfiguring(config shardctrler.Config) (lastConf
 
 func (ck *ConfigureClerk) sendReConfigured(config shardctrler.Config, state State) (err Err) {
 	args := ReConfiguredArgs{
-		Identity: Identity{int64(ck.gid), int64(1 + config.Num*2 + 1)},
+		Identity: Identity{ck.configureClientId, int64(1 + config.Num*2 + 1)},
 		State:    state,
 	}
 	reply := ReConfiguredReply{}
