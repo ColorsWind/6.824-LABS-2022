@@ -16,38 +16,66 @@ import (
 //
 
 const (
-	OK                 = "OK"
-	ErrNoKey           = "ErrNoKey"
-	ErrWrongGroup      = "ErrWrongGroup"
-	ErrWrongLeader     = "ErrWrongLeader"
-	ErrNotAvailableYet = "ErrNotAvailableYet"
+	OK                  = Err("OK")
+	ErrNoKey            = Err("ErrNoKey")
+	ErrWrongGroup       = Err("ErrWrongGroup")
+	ErrWrongLeader      = Err("ErrWrongLeader")
+	ErrNotAvailableYet  = Err("ErrNotAvailableYet")
+	ErrMatchConfiguring = Err("ErrMatchConfiguring")
+	ErrMatchConfigured  = Err("ErrMatchConfigured")
 
-	WaitComplete     = "WaitComplete"
-	ErrOutdatedRPC   = "ErrOutdatedRPC"
-	ErrApplySnapshot = "ErrApplySnapshot"
-	ErrTimeout       = "ErrTimeout"
-	ErrNotStarted    = "ErrNotStarted"
-	ErrShutdown      = "ErrShutdown"
+	WaitComplete      = Err("WaitComplete")
+	ErrOutdatedRPC    = Err("ErrOutdatedRPC")
+	ErrGetStateRacing = Err("ErrGetStateRacing")
+	ErrApplySnapshot  = Err("ErrApplySnapshot")
+	ErrTimeout        = Err("ErrTimeout")
+	ErrNotStarted     = Err("ErrNotStarted")
+	ErrShutdown       = Err("ErrShutdown")
 )
 
 type Err string
 
+type Identity struct {
+	ClientId  int64
+	CommandId int64
+}
+
+func (id Identity) String() string {
+	return fmt.Sprintf("client_id=%v, cmd_id=%v", id.ClientId, id.CommandId)
+}
+
+type KeyValue struct {
+	Key   string
+	Value string
+}
+
+func (kv KeyValue) String() string {
+	return fmt.Sprintf("key=%v, value=%v", kv.Key, raft.ToStringLimited(kv.Value, 10))
+}
+
+type State struct {
+	ConfigNum             int
+	KVMap                 map[string]string
+	LastAppliedCommandMap map[int64]ExecutedOp
+}
+
+func (st State) String() string {
+	return fmt.Sprintf("kvMap=%v, lastAppliedCommandMap=%v", st.KVMap, st.LastAppliedCommandMap)
+}
+
 // Put or Append
 type PutAppendArgs struct {
 	// You'll have to add definitions here.
-	ClientId  int64
-	CommandId int64
-
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
+	Identity
+	KeyValue
+	Op string // "Put" or "Append"
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 }
 
 func (args PutAppendArgs) String() string {
-	return fmt.Sprintf("{Key=%v, Value=%v, op=%v, client_id=%v, cmd_id=%v}", args.Key, raft.ToStringLimited(args.Value, 10), args.Op, args.ClientId, args.CommandId)
+	return fmt.Sprintf("{%v, %v, op=%v}", args.Identity, args.KeyValue, args.Op)
 }
 
 type PutAppendReply struct {
@@ -59,15 +87,13 @@ func (reply PutAppendReply) String() string {
 }
 
 type GetArgs struct {
-	ClientId  int64
-	CommandId int64
-
+	Identity
 	Key string
 	// You'll have to add definitions here.
 }
 
 func (args GetArgs) String() string {
-	return fmt.Sprintf("{Key=%v, client_id=%v, cmd_id=%v}", args.Key, args.ClientId, args.CommandId)
+	return fmt.Sprintf("{%v, key=%v}", args.Identity, args.Key)
 }
 
 type GetReply struct {
@@ -80,22 +106,54 @@ func (reply GetReply) String() string {
 }
 
 type GetStateArgs struct {
-	ClientId  int64
-	CommandId int64
-	Shards    []int
-	Config    shardctrler.Config
+	Identity
+	Shards []int
 }
 
 func (args GetStateArgs) String() string {
-	return fmt.Sprintf("{shards=%v, client_id=%v, cmd_id=%v, ctrlerConfig=%v}", args.Shards, args.ClientId, args.CommandId, args.Config)
+	return fmt.Sprintf("{%v, shards=%v}", args.Identity, args.Shards)
 }
 
 type GetStateReply struct {
-	KVMap                 map[string]string
-	LastAppliedCommandMap map[int64]ExecutedOp
-	Err                   Err
+	State
+	Err Err
 }
 
 func (reply GetStateReply) String() string {
-	return fmt.Sprintf("{kvMap=%v, lastAppliedCommandMap=%v, err=%v}", reply.KVMap, reply.LastAppliedCommandMap, reply.Err)
+	return fmt.Sprintf("{%v, Err=%v}", reply.State, reply.Err)
+}
+
+type ReConfiguringArgs struct {
+	Identity
+	Config shardctrler.Config
+}
+
+func (args ReConfiguringArgs) String() string {
+	return fmt.Sprintf("{%v, config=%v}", args.Identity, args.Config)
+}
+
+type ReConfiguringReply struct {
+	LastConfig shardctrler.Config
+	Err        Err
+}
+
+func (reply ReConfiguringReply) String() string {
+	return fmt.Sprintf("{config=%v, Err=%v}", reply.LastConfig, reply.Err)
+}
+
+type ReConfiguredArgs struct {
+	Identity
+	State
+}
+
+func (args ReConfiguredArgs) String() string {
+	return fmt.Sprintf("{%v, %v}", args.Identity, args.State)
+}
+
+type ReConfiguredReply struct {
+	Err Err
+}
+
+func (reply ReConfiguredReply) String() string {
+	return fmt.Sprintf("{Err=%v}", reply.Err)
 }

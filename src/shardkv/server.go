@@ -25,54 +25,66 @@ const (
 	OpType_GET_STATE     = "OpType_GET_STATE"
 )
 
+// ExtraArgs actual type list
+// KeyValue: OpType_GET, OpType_PUT, OpType_APPEND
+// shardctrler.Config: OpType_RECONFIGURING
+// State: OpType_RECONFIGURED
+// [shardctrler.NShards]int: OpType_GET_STATE
+type ExtraArgs interface{}
+
+// ExtraReply actual type list
+// string: OpType_GET
+// shardctrler.Config: OpType_RECONFIGURING
+// State: OpType_GET_STATE
+type ExtraReply interface{}
+
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	ClientId              int64
-	CommandId             int64
-	Type                  OpType
-	Key                   string               // OpType_GET | OpType_PUT | OpType_APPEND
-	Value                 string               // OpType_PUT | OpType_APPEND
-	Config                shardctrler.Config   // OpType_RECONFIGURING | OpType_GET_STATE
-	Num                   int                  // OpType_RECONFIGURED
-	KVMap                 map[string]string    // OpType_RECONFIGURED
-	LastAppliedCommandMap map[int64]ExecutedOp // OpType_RECONFIGURED
-	Shards                []int                // OpType_GET_STATE
+	Identity
+	Type      OpType
+	ExtraArgs ExtraArgs
 }
 
 func (op Op) String() string {
-	return fmt.Sprintf("{client_id=%v, cmd_id=%v, type=%v, Key=%v, Value=%v, Config=%v, Num=%v, KVMap=%v, LastAppliedCommandMap=%v, Shards=%v}", op.ClientId, op.CommandId, op.Type, op.Key, op.Value, op.Config, op.Num, op.KVMap, op.LastAppliedCommandMap, op.Shards)
+	return fmt.Sprintf("{%v, type=%v, extra={%v}}", op.Identity, op.Type, op.ExtraArgs)
 }
 
 type ExecutedOp struct {
 	Op
-	Result                string               // OpType_GET
-	KVMap                 map[string]string    // OpType_GET_STATE
-	LastAppliedCommandMap map[int64]ExecutedOp // OpType_GET_STATE
+	Result ExtraReply
+	Err    Err
+}
+
+func NewExecuteOp(op Op, result ExtraReply) ExecutedOp {
+	err, ok := result.(Err)
+	if ok {
+		return ExecutedOp{op, nil, err}
+	} else {
+		return ExecutedOp{op, result, OK}
+	}
 }
 
 func (ec ExecutedOp) String() string {
-	return fmt.Sprintf("{op=%v, result=%v, kvMap=%v, lastAppliedCommandMap=%v}", ec.Op, raft.ToStringLimited(ec.Result, 100), ec.KVMap, ec.LastAppliedCommandMap)
+	return fmt.Sprintf("{op=%v, result=%v}", ec.Op, raft.ToStringLimited(ec.Result, 100))
 }
 
 type ClientHandler struct {
-	mu                    sync.Mutex
-	cond                  *sync.Cond
-	clientId              int64
-	commandId             int64
-	finished              bool
-	result                string               // OpType_GET
-	kvMap                 map[string]string    // OpType_GET_STATE
-	lastAppliedCommandMap map[int64]ExecutedOp // OpType_GET_STATE
-	err                   Err
+	mu        sync.Mutex
+	cond      *sync.Cond
+	clientId  int64
+	commandId int64
+	finished  bool
+	result    interface{}
+	Err       Err
 }
 
 func (handler *ClientHandler) String() string {
 	if handler.mu.TryLock() {
 		defer handler.mu.Unlock()
 	}
-	return fmt.Sprintf("{client_id=%v, cmd_id=%v, finished=%v, result=%v, err=%v}", handler.clientId, handler.commandId, handler.finished, handler.result, handler.err)
+	return fmt.Sprintf("{client_id=%v, cmd_id=%v, finished=%v, result=%v, Err=%v}", handler.clientId, handler.commandId, handler.finished, handler.result, handler.Err)
 }
 
 type ShardKV struct {
@@ -92,217 +104,74 @@ type ShardKV struct {
 	dead      int32
 
 	// Your definitions here.
-	kvMap                 map[string]string
-	lastAppliedCommandMap map[int64]ExecutedOp
-	handlerByClientId     map[int64]*ClientHandler                      // only handleRequest will be able to modify
-	handlerByShard        [shardctrler.NShards]map[int64]*ClientHandler // only handleRequest will be able to modify
+	State
+	handlerByClientId map[int64]*ClientHandler // only handleRequest will be able to modify
+	//handlerByShard    [shardctrler.NShards]map[int64]*ClientHandler // only handleRequest will be able to modify
 
 	lastAppliedIndex int
-	ctrlerConfig     shardctrler.Config
-	stateConfig      shardctrler.Config // current shard that hold and where to get missing shard
-	configCond       *sync.Cond
 
-	// OpType_RECONFIGURING | OpType_GET_STATE
-	configureClientId  int64
-	configureCommandId int64
-
-	// OpType_GET_STATE
-	getStateClientId  int64
-	getStateCommandId int64
-}
-
-func (kv *ShardKV) handleConfigurationPoll() {
-	_, isLeader := kv.rf.GetState()
-	if !isLeader {
-		return
-	}
-	cf := kv.mck.Query(-1)
-	kv.mu.Lock()
-
-	if cf.Num == kv.ctrlerConfig.Num {
-		kv.mu.Unlock()
-		return
-	}
-	_, currentTerm, isLeader := kv.rf.Start(Op{
-		ClientId:  kv.configureClientId,
-		CommandId: atomic.AddInt64(&kv.configureCommandId, 1),
-		Type:      OpType_RECONFIGURING,
-		Config:    cf,
-	})
-	if !isLeader {
-		kv.mu.Unlock()
-		return
-	}
-	var finished int32 = 0
-
-	go func() {
-		// check timeout
-		for i := 0; ; i++ {
-			time.Sleep(250 * time.Millisecond)
-			if atomic.LoadInt32(&finished) == 1 {
-				return
-			}
-			if kv.killed() == true {
-				kv.logger.Printf("%v-%v: wait re-configuring appear in applyCh timeout, i=%v, kv=%v.\n", kv.gid, kv.me, i, kv)
-				kv.configCond.Broadcast()
-				return
-			}
-			currentTerm1, _ := kv.rf.GetState()
-			if currentTerm == currentTerm1 {
-				kv.logger.Printf("%v-%v: wait re-configuring appear in applyCh timeout, continue to wait, currentTerm=%v, i=%v.\n",
-					kv.gid, kv.me, currentTerm1, i)
-			} else {
-				kv.logger.Printf("%v-%v: wait re-configuring appear in applyCh timeout, term changed(%v -> %v), i=%v.\n",
-					kv.gid, kv.me, currentTerm, currentTerm1, i)
-				kv.configCond.Broadcast()
-				return
-			}
-
-		}
-	}()
-
-	for true {
-		kv.configCond.Wait()
-		if cf.Num == kv.ctrlerConfig.Num {
-			kv.logger.Printf("%v-%v: ctrlerConfig is up-to-date. ctrlerConfig=%v.\n", kv.gid, kv.me, kv.ctrlerConfig)
-			break
-		} else if cf.Num > kv.ctrlerConfig.Num {
-			kv.logger.Printf("%v-%v: ignore outdated ctrlerConfig. ctrlerConfig=%v.\n", kv.gid, kv.me, kv.ctrlerConfig)
-		} else {
-			kv.logger.Printf("%v-%v: ctrlerConfig is newer??? ctrlerConfig=%v.\n", kv.gid, kv.me, kv.ctrlerConfig)
-		}
-		if currentTerm1, _ := kv.rf.GetState(); currentTerm1 != currentTerm {
-			atomic.StoreInt32(&finished, 1)
-			kv.logger.Printf("%v-%v: wait ctrlerConfig, but raft lose leadership.\n", kv.gid, kv.me)
-			return
-		}
-	}
-	atomic.StoreInt32(&finished, 1)
-	// re-configuring appear in applyCh now, start to get missing state
-	gid2shards := make(map[int][]int)
-	for shard, gid := range kv.stateConfig.Shards {
-		if gid != 0 && gid != kv.me {
-			gid2shards[gid] = append(gid2shards[gid], shard)
-		}
-	}
-	stateConfig := kv.stateConfig
-	kv.mu.Unlock()
-
-	getStateKVMap := make(map[string]string)
-	getStateLastAppliedMap := make(map[int64]ExecutedOp)
-	for gid, shards := range gid2shards {
-		kv.logger.Printf("%v-%v: GetState. gid=%v, shards=%v.\n", kv.gid, kv.me, gid, shards)
-		args := GetStateArgs{kv.getStateClientId, atomic.AddInt64(&kv.getStateCommandId, 1), shards, cf}
-		for {
-			//gid := kv.ctrlerConfig.Shards[shard]
-			if servers, ok := stateConfig.Groups[gid]; ok {
-				// try each server for the shard.
-				for si := 0; si < len(servers); si++ {
-					srv := kv.make_end(servers[si])
-					var reply GetStateReply
-					ok := srv.Call("ShardKV.GetState", &args, &reply)
-					kv.logger.Printf("%v-%v call get state %v finish, reply=%v, ok=%v.\n", kv.gid, kv.me, servers[si], reply, ok)
-					if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-						// successfully get state
-						kv.logger.Printf("%v-%v: finish get state, kvMap=%v, lastAppliedCommandMap=%v.", kv.gid, kv.me, reply.KVMap, reply.LastAppliedCommandMap)
-
-						for key, value := range reply.KVMap {
-							getStateKVMap[key] = value
-						}
-						for key, value := range reply.LastAppliedCommandMap {
-							getStateLastAppliedMap[key] = value
-						}
-						return
-					}
-					if ok && (reply.Err == ErrWrongGroup) {
-						break
-					}
-					// ... not ok, or ErrWrongLeader
-				}
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-	kv.rf.Start(Op{
-		ClientId:              kv.configureClientId,
-		CommandId:             atomic.AddInt64(&kv.configureCommandId, 1),
-		Type:                  OpType_RECONFIGURED,
-		Num:                   cf.Num,
-		KVMap:                 getStateKVMap,
-		LastAppliedCommandMap: getStateLastAppliedMap,
-	})
-
+	config shardctrler.Config
 }
 
 // Only handle OpType_GET, OpType_PUT, OpType_APPEND, OpType_GET_STATE
-func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType, key string, value string, config shardctrler.Config, shard []int) (result string, kvMap map[string]string, lastAppliedCommandMap map[int64]ExecutedOp, err Err) {
+func (kv *ShardKV) handleRequest(identity Identity, opType OpType, extraArgs ExtraArgs) (extraReply ExtraReply, err Err) {
 	kv.mu.Lock()
-	switch opType {
-	case OpType_GET, OpType_PUT, OpType_APPEND:
-		keyShard := key2shard(key)
-		if kv.ctrlerConfig.Shards[keyShard] != kv.gid {
-			kv.mu.Unlock()
-			return "", nil, nil, ErrWrongGroup
-		}
-		if stateGid := kv.stateConfig.Shards[keyShard]; stateGid != kv.gid && stateGid != 0 {
 
-			kv.logger.Printf("%v-%v: Not available yet, sc=%v, cc=%v, key=%v.\n", kv.gid, kv.me, kv.stateConfig, kv.ctrlerConfig, keyShard)
-			kv.mu.Unlock()
-			return "", nil, nil, ErrNotAvailableYet
+	handler, present := kv.handlerByClientId[identity.ClientId]
+	lastAppliedCommand := kv.LastAppliedCommandMap[identity.ClientId]
+
+	// check if request will eventually complete
+	if (!present || handler.commandId != identity.CommandId) && identity.CommandId < lastAppliedCommand.CommandId {
+		kv.mu.Unlock()
+		switch opType {
+		case OpType_GET, OpType_PUT, OpType_APPEND, OpType_GET_STATE:
+			// clerk will only send one request at a time
+			kv.logger.Panicf("%v-%v: request will not complete, identity=%v, opType=%v, extraArgs=%v, lastAppliedCommand=%v, handler=%v.\n", kv.gid, kv.me, identity, opType, extraArgs, lastAppliedCommand, handler)
+		case OpType_RECONFIGURED, OpType_RECONFIGURING:
+			//kv.logger.Printf("%v-%v: configure request outdated, identity=%v, opType=%v, extraArgs=%v, lastAppliedCommand=%v, handler=%v.\n", kv.gid, kv.me, identity, opType, extraArgs, lastAppliedCommand, handler)
 		}
+		err = ErrOutdatedRPC
+		return
 	}
-	handler, present := kv.handlerByClientId[clientId]
-	if !present || handler.commandId < commandId {
+
+	if !present || handler.commandId < identity.CommandId {
 		handler = &ClientHandler{
-			clientId:  clientId,
-			commandId: commandId,
-			err:       ErrNotStarted,
+			clientId:  identity.ClientId,
+			commandId: identity.CommandId,
+			Err:       ErrNotStarted,
 			finished:  true,
 		}
 		handler.cond = sync.NewCond(&handler.mu)
-		kv.handlerByClientId[clientId] = handler
-		kv.handlerByShard[key2shard(key)][clientId] = handler
+		kv.handlerByClientId[identity.ClientId] = handler
 	}
-	lastAppliedCommand, present := kv.lastAppliedCommandMap[clientId]
+
 	kv.mu.Unlock()
 	// if already finish
 	handler.mu.Lock()
 	defer handler.mu.Unlock()
 
-	if present && lastAppliedCommand.CommandId == commandId {
+	if lastAppliedCommand.CommandId == handler.commandId && handler.Err != OK {
 		handler.result = lastAppliedCommand.Result
-		handler.err = OK
+		handler.Err = lastAppliedCommand.Err
 		handler.finished = true
 		handler.cond.Broadcast()
-		return handler.result, nil, nil, handler.err
-	}
 
-	//// if invalid command id
-	//if handler.commandId > commandId {
-	//	kv.logger.Panicf("kvserver %v receive invalid id (handler.id=%v). client_id=%v, cmd_id=%v, op_type=%v, key=%v, value=%v, handler=%v.", kv.gid, kv.me, handler.commandId, clientId, commandId, opType, key, value, handler)
-	//}
-	// if outdate rpc
-	if commandId < handler.commandId || commandId < lastAppliedCommand.CommandId {
-		return "", nil, nil, ErrOutdatedRPC
 	}
 
 	// if should retry
-	if handler.finished && handler.err != OK {
+	if handler.finished && handler.Err != OK {
 		op := Op{
-			ClientId:  clientId,
-			CommandId: commandId,
+			Identity:  identity,
 			Type:      opType,
-			Key:       key,
-			Value:     value,
-			Config:    config,
-			Shards:    shard,
+			ExtraArgs: extraArgs,
 		}
 		_, currentTerm, isLeader := kv.rf.Start(op)
 		if !isLeader {
-			return "", nil, nil, ErrWrongLeader
+			err = ErrWrongLeader
+			return
 		}
 		handler.finished = false
-		handler.err = WaitComplete
+		handler.Err = WaitComplete
 
 		// check timeout
 		go func() {
@@ -318,7 +187,7 @@ func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType,
 					handler.mu.Lock()
 					kv.logger.Printf("%v-%v: client handler killed, op=%v, handler=%v.\n",
 						kv.gid, kv.me, op, handler)
-					handler.err = ErrShutdown
+					handler.Err = ErrShutdown
 					handler.finished = true
 					handler.cond.Broadcast()
 					handler.mu.Unlock()
@@ -327,15 +196,15 @@ func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType,
 				if currentTerm == currentTerm1 {
 					kv.mu.Lock()
 					kv.logger.Printf("%v-%v: client handler continue to wait, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
-						kv.gid, kv.me, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, op, handler)
+						kv.gid, kv.me, currentTerm1, i, kv.LastAppliedCommandMap[identity.ClientId].CommandId, op, handler)
 					kv.mu.Unlock()
 				} else {
 					kv.mu.Lock()
 					kv.logger.Printf("%v-%v: client handler timeout, term changed(%v -> %v), i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
-						kv.gid, kv.me, currentTerm, currentTerm1, i, kv.lastAppliedCommandMap[clientId].CommandId, op, handler)
+						kv.gid, kv.me, currentTerm, currentTerm1, i, kv.LastAppliedCommandMap[identity.ClientId].CommandId, op, handler)
 					kv.mu.Unlock()
 					handler.mu.Lock()
-					handler.err = ErrWrongLeader
+					handler.Err = ErrWrongLeader
 					handler.finished = true
 					handler.cond.Broadcast()
 					handler.mu.Unlock()
@@ -350,14 +219,19 @@ func (kv *ShardKV) handleRequest(clientId int64, commandId int64, opType OpType,
 	for !handler.finished {
 		handler.cond.Wait()
 	}
-	return handler.result, handler.kvMap, handler.lastAppliedCommandMap, handler.err
+	extraReply = handler.result
+	err = handler.Err
+	return
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	result, _, _, err := kv.handleRequest(args.ClientId, args.CommandId, OpType_GET, args.Key, "Value_GET", shardctrler.Config{}, []int{})
-	reply.Value = result
+	result, err := kv.handleRequest(args.Identity, OpType_GET, KeyValue{args.Key, "Value_GET"})
 	reply.Err = err
+	if err == OK {
+		keyValue := result.(KeyValue)
+		reply.Value = keyValue.Value
+	}
 	kv.logger.Printf("%v-%v: Get, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
 }
 
@@ -371,18 +245,38 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	} else {
 		kv.logger.Panicf("Op is not Put or Append: %v.", args)
 	}
-	_, _, _, err := kv.handleRequest(args.ClientId, args.CommandId, opType, args.Key, args.Value, shardctrler.Config{}, []int{})
+	_, err := kv.handleRequest(args.Identity, opType, args.KeyValue)
 	reply.Err = err
 	kv.logger.Printf("%v-%v: PutAppend, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
 }
 
 func (kv *ShardKV) GetState(args *GetStateArgs, reply *GetStateReply) {
 	// Your code here.
-	_, kvMap, lastAppliedCommandMap, err := kv.handleRequest(-1, -1, OpType_GET_STATE, "Key_GetState", "Value_GetState", args.Config, args.Shards)
-	reply.KVMap = kvMap
-	reply.LastAppliedCommandMap = lastAppliedCommandMap
+	result, err := kv.handleRequest(args.Identity, OpType_GET_STATE, args.Shards)
 	reply.Err = err
+	if err == OK {
+		reply.State = result.(State)
+	}
 	kv.logger.Printf("%v-%v: GetState, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
+}
+
+func (kv *ShardKV) ReConfiguring(args *ReConfiguringArgs, reply *ReConfiguringReply) {
+	result, err := kv.handleRequest(args.Identity, OpType_RECONFIGURING, args.Config)
+	reply.Err = err
+	//fmt.Printf("%v, %v\n", result, err)
+	if err == OK {
+		reply.LastConfig = result.(shardctrler.Config)
+	}
+	if reply.Err != ErrOutdatedRPC {
+		kv.logger.Printf("%v-%v: ReConfiguring, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
+	}
+
+}
+
+func (kv *ShardKV) ReConfigured(args *ReConfiguredArgs, reply *ReConfiguredReply) {
+	_, err := kv.handleRequest(args.Identity, OpType_RECONFIGURED, args.State)
+	reply.Err = err
+	kv.logger.Printf("%v-%v: ReConfigured, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
 }
 
 //
@@ -398,7 +292,7 @@ func (kv *ShardKV) Kill() {
 	go func() {
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
-		kv.logger.Printf("%v-%v: call kill, sc=%v.\n", kv.gid, kv.me, kv.stateConfig)
+
 	}()
 
 }
@@ -408,33 +302,26 @@ func (kv *ShardKV) killed() bool {
 	return z == 1
 }
 
-func (kv *ShardKV) encodeState(kvMap map[string]string, lastAppliedCommand map[int64]ExecutedOp, stateConfig shardctrler.Config) []byte {
+func (kv *ShardKV) encodeState(config shardctrler.Config, state State) []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	if err := e.Encode(kvMap); err != nil {
-		kv.logger.Panicf("%v-%v: fail to encode kvmap: %v.", kv.gid, kv.me, kvMap)
+	if err := e.Encode(config); err != nil {
+		kv.logger.Panicf("%v-%v: fail to encode config: %v.", kv.gid, kv.me, config)
 	}
-	if err := e.Encode(lastAppliedCommand); err != nil {
-		kv.logger.Panicf("%v-%v: fail to encode lastAppliedCommand: %v.", kv.gid, kv.me, lastAppliedCommand)
-	}
-	if err := e.Encode(stateConfig); err != nil {
-		kv.logger.Panicf("%v-%v: fail to encode stateConfig: %v.", kv.gid, kv.me, lastAppliedCommand)
+	if err := e.Encode(state); err != nil {
+		kv.logger.Panicf("%v-%v: fail to encode state: %v.", kv.gid, kv.me, state)
 	}
 	return w.Bytes()
 }
 
-func (kv *ShardKV) decodeState(data []byte) (kvMap map[string]string, lastAppliedCommand map[int64]ExecutedOp, stateConfig shardctrler.Config) {
+func (kv *ShardKV) decodeState(data []byte) (config shardctrler.Config, state State) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	if err := d.Decode(&kvMap); err != nil {
-		kv.logger.Panicf("%v-%v: fail to decode kvmap, err=%v", kv.gid, kv.me, err)
+	if err := d.Decode(&config); err != nil {
+		kv.logger.Panicf("%v-%v: fail to decode config, Err=%v", kv.gid, kv.me, err)
 	}
-
-	if err := d.Decode(&lastAppliedCommand); err != nil {
-		kv.logger.Panicf("%v-%v: fail to decode lastAppliedCommandMap, err=%v.", kv.gid, kv.me, err)
-	}
-	if err := d.Decode(&stateConfig); err != nil {
-		kv.logger.Panicf("%v-%v: fail to decode stateConfig, err=%v.", kv.gid, kv.me, err)
+	if err := d.Decode(&state); err != nil {
+		kv.logger.Panicf("%v-%v: fail to decode state, Err=%v", kv.gid, kv.me, err)
 	}
 	return
 }
@@ -471,6 +358,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(shardctrler.Config{})
+	labgob.Register(State{})
+	labgob.Register(KeyValue{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -485,8 +375,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	atomic.StoreInt32(&kv.dead, 0)
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
-	kv.ctrlerConfig = kv.mck.Query(-1)
-	kv.configCond = sync.NewCond(&kv.mu)
+	kv.ConfigNum = 0
+	kv.config = kv.mck.Query(kv.ConfigNum)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -494,34 +384,28 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	//kv.logger.SetOutput(ioutil.Discard)
 
 	// You may need initialization code here.
-	kv.kvMap = make(map[string]string)
+	kv.KVMap = make(map[string]string)
 	kv.handlerByClientId = make(map[int64]*ClientHandler)
-	kv.lastAppliedCommandMap = make(map[int64]ExecutedOp)
+	kv.LastAppliedCommandMap = make(map[int64]ExecutedOp)
 	kv.lastAppliedIndex = 0
 	kv.persister = persister
-	//kvMap, lastAppliedCommandMap, lastConfig := kv.decodeState(msg.Snapshot)
 
-	for k := range kv.handlerByShard {
-		kv.handlerByShard[k] = make(map[int64]*ClientHandler)
-	}
-
-	kv.configureClientId = nrand()
-	atomic.StoreInt64(&kv.configureCommandId, 0)
-
-	kv.getStateClientId = nrand()
-	atomic.StoreInt64(&kv.getStateCommandId, 0)
+	//for k := range kv.handlerByShard {
+	//	kv.handlerByShard[k] = make(map[int64]*ClientHandler)
+	//}
 
 	kv.logger.Printf("%v-%v: shardkv startup.\n", kv.gid, kv.me)
 	go func() {
 		for !kv.killed() {
 			msg := <-kv.applyCh
-			kv.handleApplyMsg(msg)
+			kv.onApplyMsg(msg)
 		}
 	}()
 	go func() {
+		cck := MakeConfigureClerk(kv)
 		for !kv.killed() {
 			t1 := time.Now().UnixMilli()
-			kv.handleConfigurationPoll()
+			cck.onPollConfiguration()
 			t2 := time.Now().UnixMilli()
 			time.Sleep(time.Duration(100-(t2-t1)) * time.Millisecond)
 		}
@@ -529,7 +413,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	return kv
 }
 
-func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
+func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 	kv.logger.Printf("%v-%v: Receive msg: %v.\n", kv.gid, kv.me, msg)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -541,124 +425,143 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 			msg = <-kv.applyCh
 		}
 		// receive snapshot indicate is not leader
-		kvMap, lastAppliedCommandMap, lastConfig := kv.decodeState(msg.Snapshot)
-		kv.lastAppliedCommandMap = lastAppliedCommandMap
-		kv.kvMap = kvMap
+		config, state := kv.decodeState(msg.Snapshot)
+		kv.State = state
+		kv.config = config
 		kv.lastAppliedIndex = msg.SnapshotIndex
-		kv.stateConfig = lastConfig
-		for _, command := range lastAppliedCommandMap {
+		for _, command := range state.LastAppliedCommandMap {
 			handler, present := kv.handlerByClientId[command.ClientId]
 			if present && handler.commandId == command.CommandId {
 				handler.mu.Lock()
 				handler.result = command.Result
-				handler.err = OK
+				handler.Err = command.Err
 				handler.finished = true
 				handler.cond.Broadcast()
 				handler.mu.Unlock()
 			}
 		}
-		kv.logger.Printf("%v-%v: update lastAppliedIndex: %v\n", kv.gid, kv.me, lastAppliedCommandMap)
+		kv.logger.Printf("%v-%v: update lastAppliedIndex: %v\n", kv.gid, kv.me, state.LastAppliedCommandMap)
 	} else if msg.CommandValid {
 		command := msg.Command.(Op)
-
+		lastAppliedCommand := kv.LastAppliedCommandMap[command.ClientId]
 		// update state machine
-		result := ""
-		var getStateKVMap map[string]string
-		var getStateAppliedMap map[int64]ExecutedOp
-		lastAppliedCommand := kv.lastAppliedCommandMap[command.ClientId]
-
-		if (command.Type == OpType_RECONFIGURING || command.Type == OpType_GET_STATE) && command.Config.Num > kv.ctrlerConfig.Num {
-			// command contain ctrlerConfig and should try to re-configure
-			kv.logger.Printf("%v-%v: try to reconfigure %v\n", kv.gid, kv.me, command.Config.Num)
-			for shard := 0; shard < shardctrler.NShards; shard++ {
-				prevShardGid := kv.ctrlerConfig.Shards[shard]
-				currShardGid := command.Config.Shards[shard]
-				if prevShardGid == kv.gid && currShardGid != kv.gid {
-					// lost ownership of `shard`, stop process immediately
-					kv.logger.Printf("%v-%v: lost ownership of %v, remove: %v.\n", kv.gid, kv.me, shard, kv.handlerByShard)
-					for _, handler := range kv.handlerByShard[shard] {
-						handler.mu.Lock()
-						if !handler.finished || handler.err != OK {
-							handler.finished = true
-							handler.err = ErrWrongGroup
-						}
-						handler.cond.Broadcast()
-						handler.mu.Unlock()
+		var result ExtraReply
+		if command.CommandId > lastAppliedCommand.CommandId {
+			switch command.Type {
+			case OpType_GET, OpType_PUT, OpType_APPEND:
+				keyValue := command.ExtraArgs.(KeyValue)
+				keyShard := key2shard(keyValue.Key)
+				if kv.ConfigNum != kv.config.Num {
+					// TODO: make a list of affected Shard
+					result = ErrNotAvailableYet
+					kv.logger.Printf("%v-%v: current configuring, unable to handle command: %v.\n", kv.gid, kv.me, command)
+				} else if configGid := kv.config.Shards[keyShard]; configGid != kv.gid {
+					result = ErrWrongGroup
+					kv.logger.Printf("%v-%v: wrong group, unable to handle command: %v, keyShard=%v, configGid=%v.\n", kv.gid, kv.me, command, keyShard, configGid)
+				} else {
+					switch command.Type {
+					case OpType_GET:
+						result = KeyValue{"Key_GET", kv.KVMap[keyValue.Key]}
+					case OpType_PUT:
+						kv.KVMap[keyValue.Key] = keyValue.Value
+					case OpType_APPEND:
+						kv.KVMap[keyValue.Key] = kv.KVMap[keyValue.Key] + keyValue.Value
 					}
-					kv.handlerByShard[shard] = make(map[int64]*ClientHandler)
-				} else if prevShardGid != kv.gid && currShardGid == kv.gid && prevShardGid != 0 {
-					// gain ownership of `shard`, get
-					kv.logger.Printf("%v-%v: gain ownership of %v.\n", kv.gid, kv.me, shard)
 				}
-			}
-			kv.ctrlerConfig = command.Config
-			kv.configCond.Broadcast()
-		} else if command.Type == OpType_RECONFIGURED && kv.ctrlerConfig.Num != kv.stateConfig.Num && command.Num == kv.ctrlerConfig.Num {
-			kv.stateConfig = kv.ctrlerConfig
-			kv.logger.Printf("%v-%v: update stateConfig to: %v.\n", kv.gid, kv.me, kv.ctrlerConfig)
-		}
-		if command.Type != OpType_RECONFIGURING && command.Type != OpType_RECONFIGURED {
-			if command.CommandId > lastAppliedCommand.CommandId {
-				switch command.Type {
-				case OpType_GET:
-					result = kv.kvMap[command.Key]
-				case OpType_PUT:
-					kv.kvMap[command.Key] = command.Value
-				case OpType_APPEND:
-					kv.kvMap[command.Key] = kv.kvMap[command.Key] + command.Value
-				case OpType_GET_STATE:
-					// check lose shard ownership
-					getStateKVMap = make(map[string]string)
-					getStateAppliedMap = make(map[int64]ExecutedOp)
-					shardMap := make(map[int]int)
-					for _, shard := range command.Shards {
-						if kv.ctrlerConfig.Shards[shard] == kv.me {
-							log.Panicf("%v-%v: receive GetState msg, but it still owns shard %v, ctrlerConfig=%v.", kv.gid, kv.me, shard, kv.ctrlerConfig)
-						}
-						shardMap[shard] = 1
+			case OpType_GET_STATE:
+				// check lose shard ownership
+				shards := command.ExtraArgs.([]int)
+				getStateKVMap := make(map[string]string)
+				getStateAppliedMap := make(map[int64]ExecutedOp)
+				shardMap := make(map[int]int)
+				noRace := true
+				for _, shard := range shards {
+					if kv.config.Shards[shard] == kv.me {
+						log.Printf("%v-%v: receive GetState msg, but it still owns shard %v, ctrlerConfig=%v.", kv.gid, kv.me, shard, kv.config)
+						noRace = false
+						break
 					}
-					for key, value := range kv.kvMap {
+					shardMap[shard] = 1
+				}
+				if noRace {
+					for key, value := range kv.KVMap {
 						if _, present := shardMap[key2shard(key)]; present {
 							getStateKVMap[key] = value
 						}
 					}
-					for key, value := range kv.lastAppliedCommandMap {
-						if _, present := shardMap[key2shard(value.Key)]; present {
-							getStateAppliedMap[key] = value
+					for key, value := range kv.LastAppliedCommandMap {
+						switch value.Type {
+						case OpType_GET:
+							if _, present := shardMap[key2shard(value.ExtraArgs.(string))]; present {
+								getStateAppliedMap[key] = value
+							}
+						case OpType_PUT, OpType_APPEND:
+							if _, present := shardMap[key2shard(value.ExtraArgs.(KeyValue).Key)]; present {
+								getStateAppliedMap[key] = value
+							}
 						}
-					}
-				default:
-					kv.logger.Panicf("Could not identify OpType: %v.", command.Type)
-				}
-				// linearizability: for duplicated command, only the first result is acceptable
-				// because other client may invoke PUT/APPEND command
-				ec := ExecutedOp{command, result, getStateKVMap, getStateAppliedMap}
-				kv.logger.Printf("%v-%v: update %v.\n", kv.gid, kv.me, ec)
-				kv.lastAppliedCommandMap[command.ClientId] = ec
-			} else if command.CommandId == lastAppliedCommand.CommandId {
-				result = lastAppliedCommand.Result
-			} else {
-				kv.logger.Printf("%v-%v: receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", kv.gid, kv.me, msg, lastAppliedCommand.CommandId)
-			}
 
-			handler, present := kv.handlerByClientId[command.ClientId]
-			if present && handler.commandId >= command.CommandId {
-				handler.mu.Lock()
-				if handler.commandId == command.CommandId {
-					handler.result = result
-					handler.err = OK
+					}
+					result = State{
+						KVMap:                 getStateKVMap,
+						LastAppliedCommandMap: getStateAppliedMap,
+					}
 				} else {
-					handler.result = ""
-					handler.err = ErrOutdatedRPC
-					kv.logger.Printf("%v-%v: outdated RPC, handler=%v, op=%v", kv.gid, kv.me, handler, command)
+					result = ErrGetStateRacing
 				}
-				handler.finished = true
-				kv.logger.Printf("%v-%v: make client handler finished, handler=%v.\n", kv.gid, kv.me, handler)
-				handler.cond.Broadcast()
-				handler.mu.Unlock()
+			case OpType_RECONFIGURING:
+				newConfig := command.ExtraArgs.(shardctrler.Config)
+				if kv.config.Num < newConfig.Num {
+					result = kv.config
+					kv.config = newConfig
+					kv.config = command.ExtraArgs.(shardctrler.Config)
+					kv.logger.Printf("%v-%v: update current config, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
+				} else {
+					kv.logger.Printf("%v-%v: current config is as least up-to-date, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
+					result = ErrMatchConfiguring
+				}
+			case OpType_RECONFIGURED:
+				state := command.ExtraArgs.(State)
+				if kv.config.Num == state.ConfigNum {
+					kv.ConfigNum = state.ConfigNum
+					for key, value := range state.KVMap {
+						kv.KVMap[key] = value
+					}
+					for key, value := range state.LastAppliedCommandMap {
+						kv.LastAppliedCommandMap[key] = value
+					}
+					kv.logger.Printf("%v-%v: update configNum to %v.\n", kv.gid, kv.me, state.ConfigNum)
+				} else {
+					kv.logger.Printf("%v-%v: config not match. state=%v, config=%v.\n", kv.gid, kv.me, state, kv.config)
+					result = ErrMatchConfigured
+				}
+
 			}
-			kv.lastAppliedIndex = msg.CommandIndex
+			lastAppliedCommand = NewExecuteOp(command, result)
+			kv.LastAppliedCommandMap[command.ClientId] = lastAppliedCommand
+		} else if command.CommandId == lastAppliedCommand.CommandId {
+			result = lastAppliedCommand.Result
+		} else {
+			kv.logger.Panicf("%v-%v: receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", kv.gid, kv.me, msg, lastAppliedCommand.CommandId)
 		}
+
+		handler, present := kv.handlerByClientId[command.ClientId]
+		if present && handler.commandId >= command.CommandId {
+			handler.mu.Lock()
+			if handler.commandId == command.CommandId {
+				handler.result = lastAppliedCommand.Result
+				handler.Err = lastAppliedCommand.Err
+			} else {
+				handler.result = nil
+				handler.Err = ErrOutdatedRPC
+				kv.logger.Printf("%v-%v: outdated RPC, handler=%v, op=%v", kv.gid, kv.me, handler, command)
+			}
+			handler.finished = true
+			kv.logger.Printf("%v-%v: make client handler finished, handler=%v.\n", kv.gid, kv.me, handler)
+			handler.cond.Broadcast()
+			handler.mu.Unlock()
+		}
+		kv.lastAppliedIndex = msg.CommandIndex
 
 	} else {
 		kv.logger.Printf("%v-%v: detect applyCh close, return, msg=%v.\n", kv.gid, kv.me, msg)
@@ -666,7 +569,7 @@ func (kv *ShardKV) handleApplyMsg(msg raft.ApplyMsg) {
 	}
 	if kv.maxraftstate > 0 && kv.persister.RaftStateSize() > kv.maxraftstate {
 		kv.logger.Printf("%v-%v: raft state size greater maxraftstate(%v > %v), trim log.\n", kv.gid, kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
-		snapshot := kv.encodeState(kv.kvMap, kv.lastAppliedCommandMap, kv.stateConfig)
+		snapshot := kv.encodeState(kv.config, kv.State)
 		kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
 	}
 }

@@ -77,7 +77,7 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{ck.clientId, atomic.AddInt64(&ck.commandId, 1), key}
+	args := GetArgs{Identity{ck.clientId, atomic.AddInt64(&ck.commandId, 1)}, key}
 
 	for {
 		shard := key2shard(key)
@@ -92,6 +92,8 @@ func (ck *Clerk) Get(key string) string {
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
+					// known reject, increase command id and retry
+					args.CommandId = atomic.AddInt64(&ck.commandId, 1)
 					break
 				}
 				// ... not ok, or ErrWrongLeader
@@ -110,7 +112,7 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{ck.clientId, atomic.AddInt64(&ck.commandId, 1), key, value, op}
+	args := PutAppendArgs{Identity{ck.clientId, atomic.AddInt64(&ck.commandId, 1)}, KeyValue{key, value}, op}
 
 	for {
 		shard := key2shard(key)
@@ -124,6 +126,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
+					args.CommandId = atomic.AddInt64(&ck.commandId, 1)
 					break
 				}
 				// ... not ok, or ErrWrongLeader
