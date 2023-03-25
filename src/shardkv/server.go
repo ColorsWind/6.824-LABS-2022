@@ -263,7 +263,7 @@ func (kv *ShardKV) GetState(args *GetStateArgs, reply *GetStateReply) {
 func (kv *ShardKV) ReConfiguring(args *ReConfiguringArgs, reply *ReConfiguringReply) {
 	result, err := kv.handleRequest(args.Identity, OpType_RECONFIGURING, args.Config)
 	reply.Err = err
-	//fmt.Printf("%v, %v\n", result, err)
+	fmt.Printf("%v, %v\n", result, err)
 	if err == OK {
 		reply.LastConfig = result.(shardctrler.Config)
 	}
@@ -445,8 +445,8 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 		command := msg.Command.(Op)
 		lastAppliedCommand := kv.LastAppliedCommandMap[command.ClientId]
 		// update state machine
-		var result ExtraReply
 		if command.CommandId > lastAppliedCommand.CommandId {
+			var result ExtraReply
 			switch command.Type {
 			case OpType_GET, OpType_PUT, OpType_APPEND:
 				keyValue := command.ExtraArgs.(KeyValue)
@@ -540,7 +540,10 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			lastAppliedCommand = NewExecuteOp(command, result)
 			kv.LastAppliedCommandMap[command.ClientId] = lastAppliedCommand
 		} else if command.CommandId == lastAppliedCommand.CommandId {
-			result = lastAppliedCommand.Result
+			//result = lastAppliedCommand.Result
+		} else if command.Type == OpType_RECONFIGURED || command.Type == OpType_RECONFIGURING {
+			// command.CommandId < lastAppliedCommand.CommandId
+			lastAppliedCommand = NewExecuteOp(command, ErrOutdatedRPC)
 		} else {
 			kv.logger.Panicf("%v-%v: receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", kv.gid, kv.me, msg, lastAppliedCommand.CommandId)
 		}
