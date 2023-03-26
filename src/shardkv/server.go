@@ -110,10 +110,11 @@ type ShardKV struct {
 
 	lastAppliedIndex int
 
-	CurrConfig  shardctrler.Config
-	CurrState   State
-	PreConfig   shardctrler.Config
-	GetStateMap map[int]State
+	CurrConfig   shardctrler.Config
+	CurrState    State
+	PreConfig    shardctrler.Config
+	GetStateMap  map[int]State
+	AffectShards [shardctrler.NShards]bool
 }
 
 // Only handle OpType_GET, OpType_PUT, OpType_APPEND, OpType_GET_STATE
@@ -303,7 +304,7 @@ func (kv *ShardKV) killed() bool {
 	return z == 1
 }
 
-func (kv *ShardKV) encodeState(preConfig shardctrler.Config, currConfig shardctrler.Config, currState State, getStateMap map[int]State) []byte {
+func (kv *ShardKV) encodeState(preConfig shardctrler.Config, currConfig shardctrler.Config, currState State, getStateMap map[int]State, affectShards [shardctrler.NShards]bool) []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if err := e.Encode(preConfig); err != nil {
@@ -318,10 +319,13 @@ func (kv *ShardKV) encodeState(preConfig shardctrler.Config, currConfig shardctr
 	if err := e.Encode(getStateMap); err != nil {
 		kv.logger.Panicf("%v-%v: fail to encode getStateMap: %v, err=%v.", kv.gid, kv.me, getStateMap, err)
 	}
+	if err := e.Encode(affectShards); err != nil {
+		kv.logger.Panicf("%v-%v: fail to encode affectShards: %v, err=%v.", kv.gid, kv.me, getStateMap, err)
+	}
 	return w.Bytes()
 }
 
-func (kv *ShardKV) decodeState(data []byte) (preConfig shardctrler.Config, currConfig shardctrler.Config, currState State, getStateMap map[int]State) {
+func (kv *ShardKV) decodeState(data []byte) (preConfig shardctrler.Config, currConfig shardctrler.Config, currState State, getStateMap map[int]State, affectShards [shardctrler.NShards]bool) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	if err := d.Decode(&preConfig); err != nil {
@@ -335,6 +339,9 @@ func (kv *ShardKV) decodeState(data []byte) (preConfig shardctrler.Config, currC
 	}
 	if err := d.Decode(&getStateMap); err != nil {
 		kv.logger.Panicf("%v-%v: fail to decode getStateMap, Err=%v", kv.gid, kv.me, err)
+	}
+	if err := d.Decode(&affectShards); err != nil {
+		kv.logger.Panicf("%v-%v: fail to decode affectShards, Err=%v", kv.gid, kv.me, err)
 	}
 	return
 }
@@ -445,7 +452,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			msg = <-kv.applyCh
 		}
 		// receive snapshot indicate is not leader
-		kv.PreConfig, kv.CurrConfig, kv.CurrState, kv.GetStateMap = kv.decodeState(msg.Snapshot)
+		kv.PreConfig, kv.CurrConfig, kv.CurrState, kv.GetStateMap, kv.AffectShards = kv.decodeState(msg.Snapshot)
 		kv.lastAppliedIndex = msg.SnapshotIndex
 		for _, command := range kv.CurrState.LastAppliedCommandMap {
 			handler, present := kv.handlerByClientId[command.ClientId]
@@ -469,8 +476,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			case OpType_GET, OpType_PUT, OpType_APPEND:
 				keyValue := command.ExtraArgs.(KeyValue)
 				keyShard := key2shard(keyValue.Key)
-				if kv.CurrConfig.Num != kv.PreConfig.Num {
-					// TODO: make a list of affected Shard
+				if kv.CurrConfig.Num != kv.PreConfig.Num && kv.AffectShards[keyShard] == true {
 					result = ErrNotAvailableYet
 					kv.logger.Printf("%v-%v: current configuring, curr=%v, pre=%v, unable to handle command: %v.\n", kv.gid, kv.me, kv.CurrConfig, kv.PreConfig, command)
 				} else if configGid := kv.CurrConfig.Shards[keyShard]; configGid != kv.gid {
@@ -547,6 +553,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 						lastGid := kv.CurrConfig.Shards[shard]
 						currGid := newConfig.Shards[shard]
 						if lastGid != 0 && lastGid != kv.gid && currGid == kv.gid {
+							kv.AffectShards[shard] = true
 							kv.logger.Printf("%v-%v: gain ownership of shard %v, gid=%v.\n", kv.gid, kv.me, shard, lastGid)
 						} else if lastGid == kv.gid && currGid != kv.gid {
 							element, present := kv.GetStateMap[shard]
@@ -573,8 +580,11 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 								KVMap:                 getStateKVMap,
 								LastAppliedCommandMap: getStateAppliedMap,
 							}
-							kv.logger.Printf("%v-%v: lost ownership of shard %v, make map, new_gid=%v, make_state=%v.\n", kv.gid, kv.me, shard, currGid, state)
 							kv.GetStateMap[shard] = state
+							kv.AffectShards[shard] = true
+							kv.logger.Printf("%v-%v: lost ownership of shard %v, make map, new_gid=%v, make_state=%v.\n", kv.gid, kv.me, shard, currGid, state)
+						} else {
+							kv.AffectShards[shard] = false
 						}
 					}
 					kv.PreConfig = newConfig
@@ -652,7 +662,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 	}
 	if kv.maxraftstate > 0 && kv.persister.RaftStateSize() > kv.maxraftstate {
 		kv.logger.Printf("%v-%v: raft state size greater maxraftstate(%v > %v), trim log.\n", kv.gid, kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
-		snapshot := kv.encodeState(kv.PreConfig, kv.CurrConfig, kv.CurrState, kv.GetStateMap)
+		snapshot := kv.encodeState(kv.PreConfig, kv.CurrConfig, kv.CurrState, kv.GetStateMap, kv.AffectShards)
 		kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
 	}
 }
