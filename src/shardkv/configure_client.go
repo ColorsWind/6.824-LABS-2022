@@ -69,6 +69,9 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 		return
 	} else if lastConfig.Num == config.Num {
 		ck.logger.Printf("%v-%v: do Re-Configuring done nothing, shardkv is up-to-date, try Re-Configured, lastConfig=%v, queryConfig=%v.\n", ck.gid, ck.me, lastConfig, config)
+		lastConfig = ck.mck.Query(config.Num - 1)
+		//ck.configuringNum = lastConfig.Num
+		return
 	} else if lastConfig.Num+1 == config.Num {
 		ck.logger.Printf("%v-%v: update last known configuring config num to %v.\n", ck.gid, ck.me, ck.configuringNum)
 		ck.configuringNum = config.Num
@@ -96,7 +99,7 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 	for gid, shards := range gid2shards {
 		func() {
 			ck.logger.Printf("%v-%v: GetState. gid=%v, shards=%v.\n", ck.gid, ck.me, gid, shards)
-			args := GetStateArgs{Identity{ck.getStateClientId, atomic.AddInt64(&ck.commandId, 1)}, shards}
+			args := GetStateArgs{Identity{ck.getStateClientId, atomic.AddInt64(&ck.commandId, 1)}, GetState{config.Num, shards}}
 			for {
 				//gid := kv.ctrlerConfig.Shards[shard]
 				if servers, ok := lastConfig.Groups[gid]; ok {

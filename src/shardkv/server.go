@@ -252,7 +252,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *ShardKV) GetState(args *GetStateArgs, reply *GetStateReply) {
 	// Your code here.
-	result, err := kv.handleRequest(args.Identity, OpType_GET_STATE, args.Shards)
+	result, err := kv.handleRequest(args.Identity, OpType_GET_STATE, args.GetState)
 	reply.Err = err
 	if err == OK {
 		reply.State = result.(State)
@@ -361,6 +361,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(shardctrler.Config{})
 	labgob.Register(State{})
 	labgob.Register(KeyValue{})
+	labgob.Register(GetState{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -470,48 +471,59 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 				}
 			case OpType_GET_STATE:
 				// check lose shard ownership
-				shards := command.ExtraArgs.([]int)
-				getStateKVMap := make(map[string]string)
-				getStateAppliedMap := make(map[int64]ExecutedOp)
-				shardMap := make(map[int]int)
-				noRace := true
-				for _, shard := range shards {
-					if kv.config.Shards[shard] == kv.gid {
-						log.Printf("%v-%v: receive GetState msg, but it still owns shard %v, ctrlerConfig=%v.", kv.gid, kv.me, shard, kv.config)
-						noRace = false
-						break
-					}
-					shardMap[shard] = 1
-				}
-				if noRace {
-					for key, value := range kv.KVMap {
-						if _, present := shardMap[key2shard(key)]; present {
-							getStateKVMap[key] = value
+				getState := command.ExtraArgs.(GetState)
+				if getState.ConfigNum <= kv.ConfiguredNum {
+					getStateKVMap := make(map[string]string)
+					getStateAppliedMap := make(map[int64]ExecutedOp)
+					shardMap := make(map[int]int)
+					noRace := true
+					for _, shard := range getState.Shards {
+						if kv.config.Shards[shard] == kv.gid {
+							log.Printf("%v-%v: receive GetState msg, but it still owns shard %v, ctrlerConfig=%v.", kv.gid, kv.me, shard, kv.config)
+							noRace = false
+							break
 						}
+						shardMap[shard] = 1
 					}
-					for key, value := range kv.LastAppliedCommandMap {
-						switch value.Type {
-						case OpType_GET:
-							if _, present := shardMap[key2shard(value.ExtraArgs.(KeyValue).Key)]; present {
-								getStateAppliedMap[key] = value
-							}
-						case OpType_PUT, OpType_APPEND:
-							if _, present := shardMap[key2shard(value.ExtraArgs.(KeyValue).Key)]; present {
-								getStateAppliedMap[key] = value
+					if noRace {
+						for key, value := range kv.KVMap {
+							if _, present := shardMap[key2shard(key)]; present {
+								getStateKVMap[key] = value
 							}
 						}
+						for key, value := range kv.LastAppliedCommandMap {
+							switch value.Type {
+							case OpType_GET:
+								if _, present := shardMap[key2shard(value.ExtraArgs.(KeyValue).Key)]; present {
+									getStateAppliedMap[key] = value
+								}
+							case OpType_PUT, OpType_APPEND:
+								if _, present := shardMap[key2shard(value.ExtraArgs.(KeyValue).Key)]; present {
+									getStateAppliedMap[key] = value
+								}
+							}
 
+						}
+						result = State{
+							KVMap:                 getStateKVMap,
+							LastAppliedCommandMap: getStateAppliedMap,
+						}
+					} else {
+						result = ErrGetStateRacing
 					}
-					result = State{
-						KVMap:                 getStateKVMap,
-						LastAppliedCommandMap: getStateAppliedMap,
-					}
+				} else if getState.ConfigNum > kv.ConfiguredNum {
+					kv.logger.Printf("%v-%v: expected configNum=%v, but got %v, just wait, getState={%v}, config=%v.\n", kv.gid, kv.me, getState.ConfigNum, kv.State.ConfiguredNum, getState, kv.config)
+					result = ErrNotAvailableYet
 				} else {
-					result = ErrGetStateRacing
+					kv.logger.Panicf("%v-%v: expected configNum=%v, but got %v, will never get, getState={%v}, config=%v.\n", kv.gid, kv.me, getState.ConfigNum, kv.State.ConfiguredNum, getState, kv.config)
 				}
+
 			case OpType_RECONFIGURING:
 				newConfig := command.ExtraArgs.(shardctrler.Config)
-				if kv.config.Num >= newConfig.Num {
+				if kv.ConfiguredNum != kv.config.Num {
+					result = ErrNotAvailableYet
+					kv.logger.Printf("%v-%v: current configuring, unable to handle command: %v.\n", kv.gid, kv.me, command)
+				} else if kv.config.Num >= newConfig.Num {
 					kv.logger.Printf("%v-%v: current config is as least up-to-date, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
 					result = kv.config
 				} else if kv.config.Num+1 == newConfig.Num {
@@ -525,7 +537,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 				}
 			case OpType_RECONFIGURED:
 				state := command.ExtraArgs.(State)
-				if kv.config.Num == state.ConfiguredNum && kv.ConfiguredNum != state.ConfiguredNum {
+				if kv.config.Num == state.ConfiguredNum && kv.ConfiguredNum != kv.config.Num {
 					kv.ConfiguredNum = state.ConfiguredNum
 					for key, value := range state.KVMap {
 						kv.KVMap[key] = value

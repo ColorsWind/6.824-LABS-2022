@@ -73,6 +73,15 @@ func (st State) String() string {
 	return fmt.Sprintf("num=%v, kvMap=%v, lastAppliedCommandMap=%v", st.ConfiguredNum, st.KVMap, st.LastAppliedCommandMap)
 }
 
+type GetState struct {
+	ConfigNum int
+	Shards    []int
+}
+
+func (gs GetState) String() string {
+	return fmt.Sprintf("num=%v, shards=%v", gs.ConfigNum, gs.Shards)
+}
+
 // Put or Append
 type PutAppendArgs struct {
 	// You'll have to add definitions here.
@@ -117,7 +126,7 @@ func (reply GetReply) String() string {
 
 type GetStateArgs struct {
 	Identity
-	Shards []int
+	GetState
 }
 
 func (args GetStateArgs) String() string {
