@@ -86,12 +86,13 @@ func (gs GetState) String() string {
 }
 
 type ConfigState struct {
-	Accept     bool
+	Update     bool
+	Completed  bool
 	LastConfig shardctrler.Config
 }
 
 func (cs ConfigState) String() string {
-	return fmt.Sprintf("need_configured=%v, last_config=%v", cs.Accept, cs.LastConfig)
+	return fmt.Sprintf("update=%v, configuring=%v, last_config=%v", cs.Update, cs.Completed, cs.LastConfig)
 }
 
 // Put or Append
@@ -142,7 +143,7 @@ type GetStateArgs struct {
 }
 
 func (args GetStateArgs) String() string {
-	return fmt.Sprintf("{%v, shards=%v}", args.Identity, args.Shards)
+	return fmt.Sprintf("{%v, %v}", args.Identity, args.GetState)
 }
 
 type GetStateReply struct {

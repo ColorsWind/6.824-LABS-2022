@@ -23,7 +23,6 @@ const (
 	OpType_RECONFIGURING = "OpType_RECONFIGURING"
 	OpType_RECONFIGURED  = "OpType_RECONFIGURED"
 	OpType_GET_STATE     = "OpType_GET_STATE"
-	OpType_GET_STATE_OK  = "OpType_GET_STATE_OK"
 )
 
 // ExtraArgs actual type list
@@ -271,9 +270,7 @@ func (kv *ShardKV) ReConfiguring(args *ReConfiguringArgs, reply *ReConfiguringRe
 	if err == OK {
 		reply.ConfigState = result.(ConfigState)
 	}
-	if reply.Err != ErrOutdatedRPC {
-		kv.logger.Printf("%v-%v: ReConfiguring, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
-	}
+	kv.logger.Printf("%v-%v: ReConfiguring, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
 
 }
 
@@ -505,6 +502,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 							result = ErrShardDelete
 						} else {
 							delete(kv.GetStateMap, shard)
+							kv.logger.Printf("%v-%v: delete state shard %v, getStateMap=%v.\n", kv.gid, kv.me, shard, kv.GetStateMap)
 						}
 					}
 					if result == nil {
@@ -540,13 +538,11 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 						}
 					}
 				}
-
-			case OpType_GET_STATE_OK:
-
 			case OpType_RECONFIGURING:
 				newConfig := command.ExtraArgs.(shardctrler.Config)
+				kv.logger.Printf("%v-%v: reconfiguring request, command=%v, currConfig=%v, preConfig=%v.\n", kv.gid, kv.me, command, kv.CurrConfig, kv.PreConfig)
 				if kv.PreConfig.Num == kv.CurrConfig.Num && newConfig.Num == kv.CurrConfig.Num+1 {
-					result = ConfigState{true, kv.CurrConfig}
+					result = ConfigState{true, false, kv.CurrConfig}
 					for shard := 0; shard < shardctrler.NShards; shard++ {
 						lastGid := kv.CurrConfig.Shards[shard]
 						currGid := newConfig.Shards[shard]
@@ -582,6 +578,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 						}
 					}
 					kv.PreConfig = newConfig
+					kv.logger.Printf("%v-%v: update PreConfig.Num to %v.\n", kv.gid, kv.me, kv.PreConfig.Num)
 				} else {
 					if kv.PreConfig.Num != kv.CurrConfig.Num {
 						kv.logger.Printf("%v-%v: already in configuring state, command=%v, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, command, kv.PreConfig, kv.CurrConfig)
@@ -594,7 +591,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 					} else {
 						kv.logger.Panicf("%v-%v: unknown status, may be a bug, command=%v, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, command, kv.PreConfig, kv.CurrConfig)
 					}
-					result = ConfigState{false, kv.CurrConfig}
+					result = ConfigState{false, kv.PreConfig.Num == kv.CurrConfig.Num, kv.CurrConfig}
 				}
 			case OpType_RECONFIGURED:
 				state := command.ExtraArgs.(State)
@@ -615,7 +612,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 					}
 					kv.CurrConfig = kv.PreConfig
 				}
-				kv.logger.Printf("%v-%v: update configNum to %v.\n", kv.gid, kv.me, state.ConfiguredNum)
+				kv.logger.Printf("%v-%v: update CurrConfig.Num to %v.\n", kv.gid, kv.me, kv.CurrConfig.Num)
 
 			}
 			lastAppliedCommand = NewExecuteOp(command, result)
