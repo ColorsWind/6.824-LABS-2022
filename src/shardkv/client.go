@@ -91,7 +91,7 @@ func (ck *Clerk) Get(key string) string {
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
 				}
-				if ok && reply.Err.isDeterministic() {
+				if ok && reply.Err == ErrWrongGroup {
 					// known reject, increase command id and retry
 					//args.CommandId = atomic.AddInt64(&ck.commandId, 1)
 					break
@@ -125,7 +125,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				if ok && reply.Err == OK {
 					return
 				}
-				if ok && reply.Err.isDeterministic() {
+				if ok && reply.Err == ErrWrongGroup {
 					//args.CommandId = atomic.AddInt64(&ck.commandId, 1)
 					break
 				}

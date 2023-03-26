@@ -32,18 +32,11 @@ const (
 
 	ErrWrongGroup      = Err("ErrWrongGroup")
 	ErrNotAvailableYet = Err("ErrNotAvailableYet")
+
+	ErrShardDelete = Err("ErrShardDelete")
 )
 
 type Err string
-
-func (err Err) isDeterministic() bool {
-	switch err {
-	case ErrWrongGroup, ErrNotAvailableYet, ErrGetStateRacing, ErrMatchConfiguring, ErrMatchConfigured:
-		return true
-	default:
-		return false
-	}
-}
 
 type Identity struct {
 	ClientId  int64
@@ -73,13 +66,32 @@ func (st State) String() string {
 	return fmt.Sprintf("num=%v, kvMap=%v, lastAppliedCommandMap=%v", st.ConfiguredNum, st.KVMap, st.LastAppliedCommandMap)
 }
 
+//type GetStateOK struct {
+//	ConfiguredNum int
+//	Shards        []int
+//}
+//
+//func (gs GetStateOK) String() string {
+//	return fmt.Sprintf("num=%v, shards=%v", gs.ConfiguredNum, gs.Shards)
+//}
+
 type GetState struct {
 	ConfigNum int
 	Shards    []int
+	Confirm   bool
 }
 
 func (gs GetState) String() string {
-	return fmt.Sprintf("num=%v, shards=%v", gs.ConfigNum, gs.Shards)
+	return fmt.Sprintf("num=%v, shards=%v, confirm=%v", gs.ConfigNum, gs.Shards, gs.Confirm)
+}
+
+type ConfigState struct {
+	Accept     bool
+	LastConfig shardctrler.Config
+}
+
+func (cs ConfigState) String() string {
+	return fmt.Sprintf("need_configured=%v, last_config=%v", cs.Accept, cs.LastConfig)
 }
 
 // Put or Append
@@ -144,7 +156,7 @@ func (reply GetStateReply) String() string {
 
 type ReConfiguringArgs struct {
 	Identity
-	Config shardctrler.Config
+	shardctrler.Config
 }
 
 func (args ReConfiguringArgs) String() string {
@@ -152,12 +164,12 @@ func (args ReConfiguringArgs) String() string {
 }
 
 type ReConfiguringReply struct {
-	LastConfig shardctrler.Config
-	Err        Err
+	ConfigState
+	Err Err
 }
 
 func (reply ReConfiguringReply) String() string {
-	return fmt.Sprintf("{lastConfig=%v, Err=%v}", reply.LastConfig, reply.Err)
+	return fmt.Sprintf("{config_state=%v, Err=%v}", reply.ConfigState, reply.Err)
 }
 
 type ReConfiguredArgs struct {

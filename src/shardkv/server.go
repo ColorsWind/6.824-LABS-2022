@@ -23,6 +23,7 @@ const (
 	OpType_RECONFIGURING = "OpType_RECONFIGURING"
 	OpType_RECONFIGURED  = "OpType_RECONFIGURED"
 	OpType_GET_STATE     = "OpType_GET_STATE"
+	OpType_GET_STATE_OK  = "OpType_GET_STATE_OK"
 )
 
 // ExtraArgs actual type list
@@ -104,13 +105,16 @@ type ShardKV struct {
 	dead      int32
 
 	// Your definitions here.
-	State
+
 	handlerByClientId map[int64]*ClientHandler // only handleRequest will be able to modify
 	//handlerByShard    [shardctrler.NShards]map[int64]*ClientHandler // only handleRequest will be able to modify
 
 	lastAppliedIndex int
 
-	config shardctrler.Config
+	CurrConfig  shardctrler.Config
+	CurrState   State
+	PreConfig   shardctrler.Config
+	GetStateMap map[int]State
 }
 
 // Only handle OpType_GET, OpType_PUT, OpType_APPEND, OpType_GET_STATE
@@ -118,7 +122,7 @@ func (kv *ShardKV) handleRequest(identity Identity, opType OpType, extraArgs Ext
 	kv.mu.Lock()
 
 	handler, present := kv.handlerByClientId[identity.ClientId]
-	lastAppliedCommand := kv.LastAppliedCommandMap[identity.ClientId]
+	lastAppliedCommand := kv.CurrState.LastAppliedCommandMap[identity.ClientId]
 
 	// check if request will eventually complete
 	if (!present || handler.commandId != identity.CommandId) && identity.CommandId < lastAppliedCommand.CommandId {
@@ -196,12 +200,12 @@ func (kv *ShardKV) handleRequest(identity Identity, opType OpType, extraArgs Ext
 				if currentTerm == currentTerm1 {
 					kv.mu.Lock()
 					kv.logger.Printf("%v-%v: client handler continue to wait, currentTerm=%v, i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
-						kv.gid, kv.me, currentTerm1, i, kv.LastAppliedCommandMap[identity.ClientId].CommandId, op, handler)
+						kv.gid, kv.me, currentTerm1, i, kv.CurrState.LastAppliedCommandMap[identity.ClientId].CommandId, op, handler)
 					kv.mu.Unlock()
 				} else {
 					kv.mu.Lock()
 					kv.logger.Printf("%v-%v: client handler timeout, term changed(%v -> %v), i=%v, lastAppliedCmd_id=%v, op=%v, handler=%v.\n",
-						kv.gid, kv.me, currentTerm, currentTerm1, i, kv.LastAppliedCommandMap[identity.ClientId].CommandId, op, handler)
+						kv.gid, kv.me, currentTerm, currentTerm1, i, kv.CurrState.LastAppliedCommandMap[identity.ClientId].CommandId, op, handler)
 					kv.mu.Unlock()
 					handler.mu.Lock()
 					handler.Err = ErrWrongLeader
@@ -265,7 +269,7 @@ func (kv *ShardKV) ReConfiguring(args *ReConfiguringArgs, reply *ReConfiguringRe
 	reply.Err = err
 	fmt.Printf("%v, %v\n", result, err)
 	if err == OK {
-		reply.LastConfig = result.(shardctrler.Config)
+		reply.ConfigState = result.(ConfigState)
 	}
 	if reply.Err != ErrOutdatedRPC {
 		kv.logger.Printf("%v-%v: ReConfiguring, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
@@ -302,26 +306,38 @@ func (kv *ShardKV) killed() bool {
 	return z == 1
 }
 
-func (kv *ShardKV) encodeState(config shardctrler.Config, state State) []byte {
+func (kv *ShardKV) encodeState(preConfig shardctrler.Config, currConfig shardctrler.Config, currState State, getStateMap map[int]State) []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	if err := e.Encode(config); err != nil {
-		kv.logger.Panicf("%v-%v: fail to encode config: %v.", kv.gid, kv.me, config)
+	if err := e.Encode(preConfig); err != nil {
+		kv.logger.Panicf("%v-%v: fail to encode preConfig: %v, err=%v.", kv.gid, kv.me, preConfig, err)
 	}
-	if err := e.Encode(state); err != nil {
-		kv.logger.Panicf("%v-%v: fail to encode state: %v.", kv.gid, kv.me, state)
+	if err := e.Encode(currConfig); err != nil {
+		kv.logger.Panicf("%v-%v: fail to encode currConfig: %v, err=%v.", kv.gid, kv.me, currConfig, err)
+	}
+	if err := e.Encode(currState); err != nil {
+		kv.logger.Panicf("%v-%v: fail to encode currState: %v, err=%v.", kv.gid, kv.me, currState, err)
+	}
+	if err := e.Encode(getStateMap); err != nil {
+		kv.logger.Panicf("%v-%v: fail to encode getStateMap: %v, err=%v.", kv.gid, kv.me, getStateMap, err)
 	}
 	return w.Bytes()
 }
 
-func (kv *ShardKV) decodeState(data []byte) (config shardctrler.Config, state State) {
+func (kv *ShardKV) decodeState(data []byte) (preConfig shardctrler.Config, currConfig shardctrler.Config, currState State, getStateMap map[int]State) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	if err := d.Decode(&config); err != nil {
-		kv.logger.Panicf("%v-%v: fail to decode config, Err=%v", kv.gid, kv.me, err)
+	if err := d.Decode(&preConfig); err != nil {
+		kv.logger.Panicf("%v-%v: fail to decode preConfig, Err=%v", kv.gid, kv.me, err)
 	}
-	if err := d.Decode(&state); err != nil {
-		kv.logger.Panicf("%v-%v: fail to decode state, Err=%v", kv.gid, kv.me, err)
+	if err := d.Decode(&currConfig); err != nil {
+		kv.logger.Panicf("%v-%v: fail to decode currConfig, Err=%v", kv.gid, kv.me, err)
+	}
+	if err := d.Decode(&currState); err != nil {
+		kv.logger.Panicf("%v-%v: fail to decode currState, Err=%v", kv.gid, kv.me, err)
+	}
+	if err := d.Decode(&getStateMap); err != nil {
+		kv.logger.Panicf("%v-%v: fail to decode getStateMap, Err=%v", kv.gid, kv.me, err)
 	}
 	return
 }
@@ -362,6 +378,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(State{})
 	labgob.Register(KeyValue{})
 	labgob.Register(GetState{})
+	labgob.Register(ConfigState{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -376,8 +393,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	atomic.StoreInt32(&kv.dead, 0)
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
-	kv.ConfiguredNum = 0
-	kv.config = kv.mck.Query(kv.ConfiguredNum)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -385,11 +400,18 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	//kv.logger.SetOutput(ioutil.Discard)
 
 	// You may need initialization code here.
-	kv.KVMap = make(map[string]string)
+
 	kv.handlerByClientId = make(map[int64]*ClientHandler)
-	kv.LastAppliedCommandMap = make(map[int64]ExecutedOp)
 	kv.lastAppliedIndex = 0
 	kv.persister = persister
+	kv.CurrState = State{
+		ConfiguredNum:         0,
+		KVMap:                 make(map[string]string),
+		LastAppliedCommandMap: make(map[int64]ExecutedOp),
+	}
+	kv.PreConfig = shardctrler.Config{}
+	kv.CurrConfig = shardctrler.Config{}
+	kv.GetStateMap = make(map[int]State)
 
 	//for k := range kv.handlerByShard {
 	//	kv.handlerByShard[k] = make(map[int64]*ClientHandler)
@@ -426,11 +448,9 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			msg = <-kv.applyCh
 		}
 		// receive snapshot indicate is not leader
-		config, state := kv.decodeState(msg.Snapshot)
-		kv.State = state
-		kv.config = config
+		kv.PreConfig, kv.CurrConfig, kv.CurrState, kv.GetStateMap = kv.decodeState(msg.Snapshot)
 		kv.lastAppliedIndex = msg.SnapshotIndex
-		for _, command := range state.LastAppliedCommandMap {
+		for _, command := range kv.CurrState.LastAppliedCommandMap {
 			handler, present := kv.handlerByClientId[command.ClientId]
 			if present && handler.commandId == command.CommandId {
 				handler.mu.Lock()
@@ -441,10 +461,10 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 				handler.mu.Unlock()
 			}
 		}
-		kv.logger.Printf("%v-%v: update lastAppliedIndex: %v\n", kv.gid, kv.me, state.LastAppliedCommandMap)
+		kv.logger.Printf("%v-%v: update lastAppliedIndex: %v\n", kv.gid, kv.me, kv.CurrState.LastAppliedCommandMap)
 	} else if msg.CommandValid {
 		command := msg.Command.(Op)
-		lastAppliedCommand := kv.LastAppliedCommandMap[command.ClientId]
+		lastAppliedCommand := kv.CurrState.LastAppliedCommandMap[command.ClientId]
 		// update state machine
 		if command.CommandId > lastAppliedCommand.CommandId {
 			var result ExtraReply
@@ -452,114 +472,161 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			case OpType_GET, OpType_PUT, OpType_APPEND:
 				keyValue := command.ExtraArgs.(KeyValue)
 				keyShard := key2shard(keyValue.Key)
-				if kv.ConfiguredNum != kv.config.Num {
+				if kv.CurrConfig.Num != kv.PreConfig.Num {
 					// TODO: make a list of affected Shard
 					result = ErrNotAvailableYet
-					kv.logger.Printf("%v-%v: current configuring, unable to handle command: %v.\n", kv.gid, kv.me, command)
-				} else if configGid := kv.config.Shards[keyShard]; configGid != kv.gid {
+					kv.logger.Printf("%v-%v: current configuring, curr=%v, pre=%v, unable to handle command: %v.\n", kv.gid, kv.me, kv.CurrConfig, kv.PreConfig, command)
+				} else if configGid := kv.CurrConfig.Shards[keyShard]; configGid != kv.gid {
 					result = ErrWrongGroup
 					kv.logger.Printf("%v-%v: wrong group, unable to handle command: %v, keyShard=%v, configGid=%v.\n", kv.gid, kv.me, command, keyShard, configGid)
 				} else {
 					switch command.Type {
 					case OpType_GET:
-						result = KeyValue{"Key_GET", kv.KVMap[keyValue.Key]}
+						result = KeyValue{"Key_GET", kv.CurrState.KVMap[keyValue.Key]}
 					case OpType_PUT:
-						kv.KVMap[keyValue.Key] = keyValue.Value
+						kv.CurrState.KVMap[keyValue.Key] = keyValue.Value
 					case OpType_APPEND:
-						kv.KVMap[keyValue.Key] = kv.KVMap[keyValue.Key] + keyValue.Value
+						kv.CurrState.KVMap[keyValue.Key] = kv.CurrState.KVMap[keyValue.Key] + keyValue.Value
 					}
 				}
 			case OpType_GET_STATE:
 				// check lose shard ownership
+
 				getState := command.ExtraArgs.(GetState)
-				if getState.ConfigNum <= kv.ConfiguredNum {
+				if getState.Confirm {
+					getStateOK := command.ExtraArgs.(GetState)
+					for _, shard := range getStateOK.Shards {
+						state, present := kv.GetStateMap[shard]
+						if !present {
+							kv.logger.Printf("%v-%v: unable to confirm get, not exist shard %v, getStateMap=%v.\n", kv.gid, kv.me, shard, kv.GetStateMap)
+							result = ErrShardDelete
+						} else if state.ConfiguredNum != getStateOK.ConfigNum {
+							kv.logger.Printf("%v-%v: unable to confirm get, configure num != %v, getStateMap=%v.\n", kv.gid, kv.me, getStateOK.ConfigNum, kv.GetStateMap)
+							result = ErrShardDelete
+						} else {
+							delete(kv.GetStateMap, shard)
+						}
+					}
+					if result == nil {
+						result = State{}
+					}
+				} else {
 					getStateKVMap := make(map[string]string)
 					getStateAppliedMap := make(map[int64]ExecutedOp)
-					shardMap := make(map[int]int)
-					noRace := true
 					for _, shard := range getState.Shards {
-						if kv.config.Shards[shard] == kv.gid {
-							log.Printf("%v-%v: receive GetState msg, but it still owns shard %v, ctrlerConfig=%v.", kv.gid, kv.me, shard, kv.config)
-							noRace = false
+						state, present := kv.GetStateMap[shard]
+						if !present {
+							kv.logger.Printf("%v-%v: unable to get state, not exist shard %v, getStateMap=%v.\n", kv.gid, kv.me, shard, kv.GetStateMap)
+							result = ErrShardDelete
 							break
-						}
-						shardMap[shard] = 1
-					}
-					if noRace {
-						for key, value := range kv.KVMap {
-							if _, present := shardMap[key2shard(key)]; present {
+						} else if state.ConfiguredNum != getState.ConfigNum {
+							kv.logger.Printf("%v-%v: unable to get state, configure num != %v, getStateMap=%v.\n", kv.gid, kv.me, getState.ConfigNum, kv.GetStateMap)
+							result = ErrShardDelete
+							break
+						} else {
+							for key, value := range state.KVMap {
 								getStateKVMap[key] = value
 							}
-						}
-						for key, value := range kv.LastAppliedCommandMap {
-							switch value.Type {
-							case OpType_GET:
-								if _, present := shardMap[key2shard(value.ExtraArgs.(KeyValue).Key)]; present {
-									getStateAppliedMap[key] = value
-								}
-							case OpType_PUT, OpType_APPEND:
-								if _, present := shardMap[key2shard(value.ExtraArgs.(KeyValue).Key)]; present {
-									getStateAppliedMap[key] = value
-								}
+							for key, value := range state.LastAppliedCommandMap {
+								getStateAppliedMap[key] = value
 							}
-
 						}
+					}
+					if result == nil {
 						result = State{
+							ConfiguredNum:         getState.ConfigNum,
 							KVMap:                 getStateKVMap,
 							LastAppliedCommandMap: getStateAppliedMap,
 						}
-					} else {
-						result = ErrGetStateRacing
 					}
-				} else if getState.ConfigNum > kv.ConfiguredNum {
-					kv.logger.Printf("%v-%v: expected configNum=%v, but got %v, just wait, getState={%v}, config=%v.\n", kv.gid, kv.me, getState.ConfigNum, kv.State.ConfiguredNum, getState, kv.config)
-					result = ErrNotAvailableYet
-				} else {
-					kv.logger.Panicf("%v-%v: expected configNum=%v, but got %v, will never get, getState={%v}, config=%v.\n", kv.gid, kv.me, getState.ConfigNum, kv.State.ConfiguredNum, getState, kv.config)
 				}
+
+			case OpType_GET_STATE_OK:
 
 			case OpType_RECONFIGURING:
 				newConfig := command.ExtraArgs.(shardctrler.Config)
-				if kv.ConfiguredNum != kv.config.Num {
-					result = ErrNotAvailableYet
-					kv.logger.Printf("%v-%v: current configuring, unable to handle command: %v.\n", kv.gid, kv.me, command)
-				} else if kv.config.Num >= newConfig.Num {
-					kv.logger.Printf("%v-%v: current config is as least up-to-date, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
-					result = kv.config
-				} else if kv.config.Num+1 == newConfig.Num {
-					result = kv.config
-					kv.config = newConfig
-					kv.config = command.ExtraArgs.(shardctrler.Config)
-					kv.logger.Printf("%v-%v: update current config, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
+				if kv.PreConfig.Num == kv.CurrConfig.Num && newConfig.Num == kv.CurrConfig.Num+1 {
+					result = ConfigState{true, kv.CurrConfig}
+					for shard := 0; shard < shardctrler.NShards; shard++ {
+						lastGid := kv.CurrConfig.Shards[shard]
+						currGid := newConfig.Shards[shard]
+						if lastGid != 0 && lastGid != kv.gid && currGid == kv.gid {
+							kv.logger.Printf("%v-%v: gain ownership of shard %v, gid=%v.\n", kv.gid, kv.me, shard, lastGid)
+						} else if lastGid == kv.gid && currGid != kv.gid {
+							element, present := kv.GetStateMap[shard]
+							if present {
+								kv.logger.Panicf("%v-%v: try to make a map of shard %v, but already exist, element=%v, command=%v, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, shard, command, element, kv.PreConfig, kv.CurrConfig)
+							}
+							getStateKVMap := make(map[string]string)
+							getStateAppliedMap := make(map[int64]ExecutedOp)
+							// TODO fast iteration, reduce time complexity
+							for key, value := range kv.CurrState.KVMap {
+								if key2shard(key) == shard {
+									getStateKVMap[key] = value
+									delete(kv.CurrState.KVMap, key)
+								}
+							}
+							for key, value := range kv.CurrState.LastAppliedCommandMap {
+								if keyValue, ok := value.ExtraArgs.(KeyValue); ok && key2shard(keyValue.Key) == shard {
+									getStateAppliedMap[key] = value
+									delete(kv.CurrState.LastAppliedCommandMap, key)
+								}
+							}
+							state := State{
+								ConfiguredNum:         kv.CurrConfig.Num,
+								KVMap:                 getStateKVMap,
+								LastAppliedCommandMap: getStateAppliedMap,
+							}
+							kv.logger.Printf("%v-%v: lost ownership of shard %v, make map, new_gid=%v, make_state=%v.\n", kv.gid, kv.me, shard, currGid, state)
+							kv.GetStateMap[shard] = state
+						}
+					}
+					kv.PreConfig = newConfig
 				} else {
-					result = kv.config
-					kv.logger.Printf("%v-%v: request config is too new, expect new_num = curr_num + 1, curr=%v, args=%v.\n", kv.gid, kv.me, kv.config, newConfig)
+					if kv.PreConfig.Num != kv.CurrConfig.Num {
+						kv.logger.Printf("%v-%v: already in configuring state, command=%v, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, command, kv.PreConfig, kv.CurrConfig)
+					} else if kv.CurrConfig.Num == newConfig.Num {
+						kv.logger.Printf("%v-%v: configuring already submitted, command=%v, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, command, kv.PreConfig, kv.CurrConfig)
+					} else if kv.CurrConfig.Num > newConfig.Num {
+						kv.logger.Printf("%v-%v: configuring is outdated, command=%v, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, command, kv.PreConfig, kv.CurrConfig)
+					} else if newConfig.Num > kv.CurrConfig.Num+1 {
+						kv.logger.Printf("%v-%v: configuring is too new, command=%v, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, command, kv.PreConfig, kv.CurrConfig)
+					} else {
+						kv.logger.Panicf("%v-%v: unknown status, may be a bug, command=%v, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, command, kv.PreConfig, kv.CurrConfig)
+					}
+					result = ConfigState{false, kv.CurrConfig}
 				}
 			case OpType_RECONFIGURED:
 				state := command.ExtraArgs.(State)
-				if kv.config.Num == state.ConfiguredNum && kv.ConfiguredNum != kv.config.Num {
-					kv.ConfiguredNum = state.ConfiguredNum
+				if kv.CurrConfig.Num == kv.PreConfig.Num && kv.CurrConfig.Num == state.ConfiguredNum {
+					kv.logger.Printf("%v-%v: configured accept(duplicated). state=%v, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, state, kv.CurrConfig, kv.PreConfig)
+				} else if kv.CurrConfig.Num == kv.PreConfig.Num && kv.CurrConfig.Num != state.ConfiguredNum {
+					kv.logger.Printf("%v-%v: current is not configuring status. state=%v, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, state, kv.CurrConfig, kv.PreConfig)
+					result = ErrMatchConfigured
+				} else if kv.PreConfig.Num != state.ConfiguredNum {
+					kv.logger.Printf("%v-%v: configured not matched. state=%v, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, state, kv.CurrConfig, kv.PreConfig)
+					result = ErrMatchConfigured
+				} else {
 					for key, value := range state.KVMap {
-						kv.KVMap[key] = value
+						kv.CurrState.KVMap[key] = value
 					}
 					for key, value := range state.LastAppliedCommandMap {
-						kv.LastAppliedCommandMap[key] = value
+						kv.CurrState.LastAppliedCommandMap[key] = value
 					}
-					kv.logger.Printf("%v-%v: update configNum to %v.\n", kv.gid, kv.me, state.ConfiguredNum)
-				} else {
-					kv.logger.Printf("%v-%v: config not match. state=%v, config=%v.\n", kv.gid, kv.me, state, kv.config)
-					result = ErrMatchConfigured
+					kv.CurrConfig = kv.PreConfig
 				}
+				kv.logger.Printf("%v-%v: update configNum to %v.\n", kv.gid, kv.me, state.ConfiguredNum)
 
 			}
 			lastAppliedCommand = NewExecuteOp(command, result)
 			if _, containsErr := result.(Err); !containsErr {
-				kv.LastAppliedCommandMap[command.ClientId] = lastAppliedCommand
 				// only successfully command need to deduplicate
+				kv.CurrState.LastAppliedCommandMap[command.ClientId] = lastAppliedCommand
 			}
 
 		} else if command.CommandId == lastAppliedCommand.CommandId {
-			//result = lastAppliedCommand.Result
+			// ignore, use lastAppliedCommand
+			// result = lastAppliedCommand.Result
 		} else {
 			kv.logger.Panicf("%v-%v: receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", kv.gid, kv.me, msg, lastAppliedCommand.CommandId)
 		}
@@ -588,7 +655,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 	}
 	if kv.maxraftstate > 0 && kv.persister.RaftStateSize() > kv.maxraftstate {
 		kv.logger.Printf("%v-%v: raft state size greater maxraftstate(%v > %v), trim log.\n", kv.gid, kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
-		snapshot := kv.encodeState(kv.config, kv.State)
+		snapshot := kv.encodeState(kv.PreConfig, kv.CurrConfig, kv.CurrState, kv.GetStateMap)
 		kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
 	}
 }
