@@ -56,24 +56,24 @@ func (kv KeyValue) String() string {
 	return fmt.Sprintf("key=%v, value=%v", kv.Key, raft.ToStringLimited(kv.Value, 10))
 }
 
-type State struct {
+type KVState struct {
 	ConfiguredNum         int
 	KVMap                 map[string]string
 	LastAppliedCommandMap map[int64]ExecutedOp
 }
 
-func (st State) String() string {
+func (st KVState) String() string {
 	return fmt.Sprintf("num=%v, kvMap=%v, lastAppliedCommandMap=%v", st.ConfiguredNum, st.KVMap, st.LastAppliedCommandMap)
 }
 
-//type GetStateOK struct {
-//	ConfiguredNum int
-//	Shards        []int
-//}
-//
-//func (gs GetStateOK) String() string {
-//	return fmt.Sprintf("num=%v, shards=%v", gs.ConfiguredNum, gs.Shards)
-//}
+type PartialConfiguration struct {
+	Shards []int
+	KVState
+}
+
+func (pc PartialConfiguration) String() string {
+	return fmt.Sprintf("shards=%v, %v", pc.Shards, pc.KVState)
+}
 
 type GetState struct {
 	ConfigNum int
@@ -86,13 +86,13 @@ func (gs GetState) String() string {
 }
 
 type ConfigState struct {
-	Update     bool
-	Completed  bool
-	LastConfig shardctrler.Config
+	Update           bool
+	Completed        bool
+	ConfiguredConfig shardctrler.Config
 }
 
 func (cs ConfigState) String() string {
-	return fmt.Sprintf("update=%v, configuring=%v, last_config=%v", cs.Update, cs.Completed, cs.LastConfig)
+	return fmt.Sprintf("update=%v, configuring=%v, configured_config=%v", cs.Update, cs.Completed, cs.ConfiguredConfig)
 }
 
 // Put or Append
@@ -147,12 +147,12 @@ func (args GetStateArgs) String() string {
 }
 
 type GetStateReply struct {
-	State
+	KVState
 	Err Err
 }
 
 func (reply GetStateReply) String() string {
-	return fmt.Sprintf("{%v, Err=%v}", reply.State, reply.Err)
+	return fmt.Sprintf("{%v, Err=%v}", reply.KVState, reply.Err)
 }
 
 type ReConfiguringArgs struct {
@@ -175,17 +175,18 @@ func (reply ReConfiguringReply) String() string {
 
 type ReConfiguredArgs struct {
 	Identity
-	State
+	PartialConfiguration
 }
 
 func (args ReConfiguredArgs) String() string {
-	return fmt.Sprintf("{%v, %v}", args.Identity, args.State)
+	return fmt.Sprintf("{%v, %v}", args.Identity, args.KVState)
 }
 
 type ReConfiguredReply struct {
-	Err Err
+	MissingShards []int
+	Err           Err
 }
 
 func (reply ReConfiguredReply) String() string {
-	return fmt.Sprintf("{Err=%v}", reply.Err)
+	return fmt.Sprintf("{MissingShards=%v, Err=%v}", reply.MissingShards, reply.Err)
 }

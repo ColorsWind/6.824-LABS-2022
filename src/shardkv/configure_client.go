@@ -5,6 +5,7 @@ import (
 	"6.824/shardctrler"
 	"log"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -51,7 +52,7 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 
 	queryConfig := ck.mck.Query(-1)
 	if queryConfig.Num < ck.preConfigNum {
-		ck.logger.Panicf("%v-%v: queryConfig.Num < ck.conf.LastConfig.Num, something went wrong, queryConfig=%v, conf=%v\n", ck.gid, ck.me, queryConfig, ck.preConfigNum)
+		ck.logger.Panicf("%v-%v: queryConfig.Num < ck.conf.ConfiguredConfig.Num, something went wrong, queryConfig=%v, conf=%v\n", ck.gid, ck.me, queryConfig, ck.preConfigNum)
 	}
 
 	if queryConfig.Num == ck.preConfigNum && queryConfig.Num == ck.configuredNum {
@@ -59,6 +60,7 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 	}
 
 	configState, err := ck.sendReConfiguring(queryConfig)
+	configuredConfig := configState.ConfiguredConfig
 	if err != OK {
 		ck.logger.Printf("%v-%v: do Re-Completed fail, Err=%v.\n", ck.gid, ck.me, err)
 		return
@@ -68,36 +70,41 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 	var alreadyCompleted bool
 	var preConfig shardctrler.Config
 	for i := 0; true; i++ {
+
 		if configState.Update {
+			ck.logger.Printf("%v-%v: update re-configuring, configNum=%v, configState=%v, queryConfig=%v.\n", ck.gid, ck.me, ck.preConfigNum, configState, queryConfig)
 			preConfig = queryConfig
 			alreadyCompleted = false
-			ck.logger.Printf("%v-%v: update re-configuring, configNum=%v, configState=%v, queryConfig=%v.\n", ck.gid, ck.me, ck.preConfigNum, configState, queryConfig)
 			break
 		} else if !configState.Completed {
-			preConfig = configState.LastConfig
+			preConfig = ck.mck.Query(configuredConfig.Num + 1)
 			alreadyCompleted = false
 			break
 		} else {
-			// preConfig already completed, check whether we should start new one
-			preConfig = configState.LastConfig
-			if configState.LastConfig.Num == queryConfig.Num-1 {
-				ck.logger.Printf("%v-%v: during re-configuring, unknown situation #1, i=%v, queryConfig=%v, configState=%v, preConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, preConfig, alreadyCompleted)
-			} else if configState.LastConfig.Num < queryConfig.Num-1 {
-				queryConfig = ck.mck.Query(preConfig.Num + 1)
+			// not update, completed, should configure a new one
+			if configuredConfig.Num == queryConfig.Num-1 {
+				// queryConfig - 1 is completed, but update to queryConfig fail ???
+				ck.logger.Panicf("%v-%v: during re-configuring, unknown situation #1, i=%v, queryConfig=%v, configState=%v, configuredConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, configuredConfig, alreadyCompleted)
+			} else if configuredConfig.Num < queryConfig.Num-1 {
+				queryConfig = ck.mck.Query(configuredConfig.Num + 1)
 				configState, err = ck.sendReConfiguring(queryConfig)
-				ck.logger.Printf("%v-%v: query config is too new to update, retry with old one, i=%v, queryConfig=%v, configState=%v, preConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, preConfig, alreadyCompleted)
+				configuredConfig = configState.ConfiguredConfig
+				ck.logger.Printf("%v-%v: query config is too new to update, retry with old one, i=%v, queryConfig=%v, configState=%v, configuredConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, configuredConfig, alreadyCompleted)
 				continue
-			} else if configState.LastConfig.Num == queryConfig.Num {
+			} else if configuredConfig.Num == queryConfig.Num {
+				// queryConfig is completed, other client has already done our job
 				alreadyCompleted = true
-				ck.logger.Printf("%v-%v: already submit and complete, i=%v, queryConfig=%v, configState=%v, preConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, preConfig, alreadyCompleted)
+				preConfig = queryConfig
+				ck.logger.Printf("%v-%v: already submit and complete, i=%v, queryConfig=%v, configState=%v, configuredConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, configuredConfig, alreadyCompleted)
 				break
-			} else if preConfig.Num > queryConfig.Num {
+			} else if configuredConfig.Num > queryConfig.Num {
 				queryConfig = ck.mck.Query(-1)
 				configState, err = ck.sendReConfiguring(queryConfig)
-				ck.logger.Printf("%v-%v:concurrent configuration change, i=%v, queryConfig=%v, configState=%v, preConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, preConfig, alreadyCompleted)
+				configuredConfig = configState.ConfiguredConfig
+				ck.logger.Printf("%v-%v: concurrent configuration change, i=%v, queryConfig=%v, configState=%v, configuredConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, configuredConfig, alreadyCompleted)
 				continue
 			} else {
-				ck.logger.Printf("%v-%v: during re-configuring, unknown situation #2, i=%v, queryConfig=%v, configState=%v, preConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, preConfig, alreadyCompleted)
+				ck.logger.Panicf("%v-%v: during re-configuring, unknown situation #2, i=%v, queryConfig=%v, configState=%v, configuredConfig=%v, alreadyCompleted=%v.\n", ck.gid, ck.me, i, queryConfig, configState, configuredConfig, alreadyCompleted)
 			}
 		}
 	}
@@ -110,61 +117,86 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 
 	if !alreadyCompleted {
 
-		// may need to do re-configured
-		currConfig := ck.mck.Query(preConfig.Num + 1)
-		// FIXME: reduce unnecessary RPC
-		if currConfig.Num == preConfig.Num {
-			ck.logger.Printf("%v-%v: during re-configured, something went wrong, preConfig=%v, currConfig=%v, queryConfig=%v, configState=%v.\n", ck.gid, ck.me, preConfig, currConfig, queryConfig, configState)
-			return
+		if configuredConfig.Num+1 != preConfig.Num {
+			ck.logger.Panicf("%v-%v: during re-configured, something went wrong, preConfig=%v, configuredConfig=%v, queryConfig=%v, configState=%v.\n", ck.gid, ck.me, preConfig, configuredConfig, queryConfig, configState)
 		}
 
 		gid2shards := make(map[int][]int)
 		for shard := range preConfig.Shards {
-			lastGid := preConfig.Shards[shard]
-			currGid := currConfig.Shards[shard]
-			if lastGid != 0 && lastGid != ck.gid && currGid == ck.gid {
-				gid2shards[lastGid] = append(gid2shards[lastGid], shard)
-				ck.logger.Printf("%v-%v: gain ownership of shard %v, gid=%v.\n", ck.gid, ck.me, shard, lastGid)
-			} else if lastGid == ck.gid && currGid != ck.gid {
-				ck.logger.Printf("%v-%v: lost ownership of shard %v, new_gid=%v.\n", ck.gid, ck.me, shard, currGid)
+			configuredGid := configuredConfig.Shards[shard]
+			preGid := preConfig.Shards[shard]
+			if configuredGid != 0 && configuredGid != ck.gid && preGid == ck.gid {
+				gid2shards[configuredGid] = append(gid2shards[configuredGid], shard)
+				ck.logger.Printf("%v-%v: gain ownership of shard %v, gid=%v.\n", ck.gid, ck.me, shard, configuredGid)
+			} else if configuredGid == ck.gid && preGid != ck.gid {
+				ck.logger.Printf("%v-%v: lost ownership of shard %v, new_gid=%v.\n", ck.gid, ck.me, shard, preGid)
 			}
 		}
+		mu := sync.Mutex{}
+		if len(gid2shards) > 0 {
+			ch := make(chan int)
+			for gid, shards := range gid2shards {
+				gid := gid
+				shards := shards
+				go func() {
+					mu.Lock()
+					// FIXME: use different client id to get state concurrent
+					state, err := ck.sendGetState(configuredConfig, gid, shards, false)
+					mu.Unlock()
+					switch err {
+					case OK:
+						ck.logger.Printf("%v-%v: get state success, gid=%v, shards=%v.\n", ck.gid, ck.me, gid, shards)
+						mu.Lock()
+						missing, err := ck.sendReConfigured(PartialConfiguration{shards, KVState{preConfig.Num, state.KVMap, state.LastAppliedCommandMap}})
+						mu.Unlock()
+						ck.logger.Printf("%v-%v: re-configured, shards=%v, missing=%v, err=%v.\n", ck.gid, ck.me, shards, missing, err)
+						if err == OK {
+							ch <- len(missing)
+							mu.Lock()
+							_, err = ck.sendGetState(configuredConfig, gid, shards, true)
+							mu.Unlock()
+							ck.logger.Printf("%v-%v: get state confirm, err=%v.\n", ck.gid, ck.me, err)
+						} else {
+							ch <- -1
+						}
 
-		getStateKVMap := make(map[string]string)
-		getStateLastAppliedMap := make(map[int64]ExecutedOp)
-		for gid, shards := range gid2shards {
-			state, err := ck.sendGetState(preConfig, gid, shards, false)
-			if err == ErrShardDelete {
-				ck.logger.Printf("%v-%v: send get state, but get err=%v, state=%v, maybe other shardkv already updated.\n", ck.gid, ck.me, err, state)
+					case ErrShardDelete:
+						ck.logger.Printf("%v-%v: get state fail, gid=%v, shards=%v, but get err=%v, state=%v, maybe other shardkv already updated.\n", ck.gid, ck.me, gid, shards, err, state)
+						ch <- -2
+					default:
+						ck.logger.Panicf("%v-%v: get state fail, gid=%v, shards=%v, but get err=%v, state=%v, maybe other shardkv already updated.\n", ck.gid, ck.me, gid, shards, err, state)
+					}
+				}()
+
+			}
+
+			for range gid2shards {
+				missing := <-ch
+				if missing == 0 {
+					ck.configuredNum = preConfig.Num
+					ck.logger.Printf("%v-%v: missing is empty, update last known configured Num to %v.\n", ck.gid, ck.me, ck.configuredNum)
+				}
+			}
+		} else {
+			missing, err := ck.sendReConfigured(PartialConfiguration{nil, KVState{preConfig.Num, nil, nil}})
+			if err != OK {
+				ck.logger.Printf("%v-%v: expect re-configured success, but err=%v.\n", ck.gid, ck.me, err)
 				return
-			} else if err != OK {
-				ck.logger.Panicf("%v-%v: send get state, but get err=%v, state=%v, maybe is a bug.\n", ck.gid, ck.me, err, state)
-			} else {
-				for key, value := range state.KVMap {
-					getStateKVMap[key] = value
-				}
-				for key, value := range state.LastAppliedCommandMap {
-					getStateLastAppliedMap[key] = value
-				}
 			}
+			if len(missing) > 0 {
+				ck.logger.Panicf("%v-%v: expect missing is empty, but got: %v.\n", ck.gid, ck.me, missing)
+			}
+			ck.configuredNum = preConfig.Num
+			ck.logger.Printf("%v-%v: group not affected, just update last known configured Num to %v.\n", ck.gid, ck.me, ck.configuredNum)
 		}
-		err = ck.sendReConfigured(State{currConfig.Num, getStateKVMap, getStateLastAppliedMap})
-		if err != OK {
-			ck.logger.Printf("%v-%v: do Re-Configured fail, Err=%v.\n", ck.gid, ck.me, err)
-			return
-		}
-		for gid, shards := range gid2shards {
-			state, err := ck.sendGetState(preConfig, gid, shards, true)
-			ck.logger.Printf("%v-%v: send state confirm, get err=%v, state=%v.\n", ck.gid, ck.me, err, state)
-		}
+	} else {
+		ck.configuredNum = configuredConfig.Num
+		ck.logger.Printf("%v-%v: no need to send re-configured, update last known configured Num to %v.\n", ck.gid, ck.me, ck.configuredNum)
 	}
-
-	ck.configuredNum = preConfig.Num
-	ck.logger.Printf("%v-%v: update last known configured queryConfig2 num to %v.\n", ck.gid, ck.me, ck.configuredNum)
 
 }
 
-func (ck *ConfigureClerk) sendGetState(lastConfig shardctrler.Config, gid int, shards []int, confirm bool) (state State, err Err) {
+func (ck *ConfigureClerk) sendGetState(lastConfig shardctrler.Config, gid int, shards []int, confirm bool) (state KVState, err Err) {
 	ck.logger.Printf("%v-%v: GetState. gid=%v, shards=%v.\n", ck.gid, ck.me, gid, shards)
 	args := GetStateArgs{Identity{ck.getStateClientId, atomic.AddInt64(&ck.getStateCommandId, 1)}, GetState{lastConfig.Num, shards, confirm}}
 	for {
@@ -179,7 +211,7 @@ func (ck *ConfigureClerk) sendGetState(lastConfig shardctrler.Config, gid int, s
 				if ok && (reply.Err == OK || reply.Err == ErrShardDelete) {
 					// successfully get state
 					ck.logger.Printf("%v-%v: finish get state ok, args=%v, reply=%v.", ck.gid, ck.me, args, reply)
-					return reply.State, reply.Err
+					return reply.KVState, reply.Err
 				}
 				if ok && reply.Err == ErrWrongGroup {
 					//args.CommandId = atomic.AddInt64(&ck.getStateCommandId, 1)
@@ -202,12 +234,12 @@ func (ck *ConfigureClerk) sendReConfiguring(config shardctrler.Config) (configSt
 	return reply.ConfigState, reply.Err
 }
 
-func (ck *ConfigureClerk) sendReConfigured(state State) (err Err) {
+func (ck *ConfigureClerk) sendReConfigured(partialConfig PartialConfiguration) (missingShards []int, err Err) {
 	args := ReConfiguredArgs{
-		Identity: Identity{ck.configureClientId, atomic.AddInt64(&ck.configureCommandId, 1)},
-		State:    state,
+		Identity:             Identity{ck.configureClientId, atomic.AddInt64(&ck.configureCommandId, 1)},
+		PartialConfiguration: partialConfig,
 	}
 	reply := ReConfiguredReply{}
 	ck.kv.ReConfigured(&args, &reply)
-	return reply.Err
+	return reply.MissingShards, reply.Err
 }

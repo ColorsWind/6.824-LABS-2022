@@ -28,14 +28,14 @@ const (
 // ExtraArgs actual type list
 // KeyValue: OpType_GET, OpType_PUT, OpType_APPEND
 // shardctrler.Config: OpType_RECONFIGURING
-// State: OpType_RECONFIGURED
+// KVState: OpType_RECONFIGURED
 // [shardctrler.NShards]int: OpType_GET_STATE
 type ExtraArgs interface{}
 
 // ExtraReply actual type list
 // string: OpType_GET
 // shardctrler.Config: OpType_RECONFIGURING
-// State: OpType_GET_STATE
+// KVState: OpType_GET_STATE
 type ExtraReply interface{}
 
 type Op struct {
@@ -111,9 +111,9 @@ type ShardKV struct {
 	lastAppliedIndex int
 
 	CurrConfig   shardctrler.Config
-	CurrState    State
+	CurrState    KVState
 	PreConfig    shardctrler.Config
-	GetStateMap  map[int]State
+	GetStateMap  map[int]KVState
 	AffectShards [shardctrler.NShards]bool
 }
 
@@ -259,7 +259,7 @@ func (kv *ShardKV) GetState(args *GetStateArgs, reply *GetStateReply) {
 	result, err := kv.handleRequest(args.Identity, OpType_GET_STATE, args.GetState)
 	reply.Err = err
 	if err == OK {
-		reply.State = result.(State)
+		reply.KVState = result.(KVState)
 	}
 	kv.logger.Printf("%v-%v: GetState, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
 }
@@ -276,8 +276,11 @@ func (kv *ShardKV) ReConfiguring(args *ReConfiguringArgs, reply *ReConfiguringRe
 }
 
 func (kv *ShardKV) ReConfigured(args *ReConfiguredArgs, reply *ReConfiguredReply) {
-	_, err := kv.handleRequest(args.Identity, OpType_RECONFIGURED, args.State)
+	missingShards, err := kv.handleRequest(args.Identity, OpType_RECONFIGURED, args.PartialConfiguration)
 	reply.Err = err
+	if err == OK {
+		reply.MissingShards = missingShards.([]int)
+	}
 	kv.logger.Printf("%v-%v: ReConfigured, args=%v, reply=%v.\n", kv.gid, kv.me, args, reply)
 }
 
@@ -304,7 +307,7 @@ func (kv *ShardKV) killed() bool {
 	return z == 1
 }
 
-func (kv *ShardKV) encodeState(preConfig shardctrler.Config, currConfig shardctrler.Config, currState State, getStateMap map[int]State, affectShards [shardctrler.NShards]bool) []byte {
+func (kv *ShardKV) encodeState(preConfig shardctrler.Config, currConfig shardctrler.Config, currState KVState, getStateMap map[int]KVState, affectShards [shardctrler.NShards]bool) []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if err := e.Encode(preConfig); err != nil {
@@ -325,7 +328,7 @@ func (kv *ShardKV) encodeState(preConfig shardctrler.Config, currConfig shardctr
 	return w.Bytes()
 }
 
-func (kv *ShardKV) decodeState(data []byte) (preConfig shardctrler.Config, currConfig shardctrler.Config, currState State, getStateMap map[int]State, affectShards [shardctrler.NShards]bool) {
+func (kv *ShardKV) decodeState(data []byte) (preConfig shardctrler.Config, currConfig shardctrler.Config, currState KVState, getStateMap map[int]KVState, affectShards [shardctrler.NShards]bool) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	if err := d.Decode(&preConfig); err != nil {
@@ -365,7 +368,7 @@ func (kv *ShardKV) decodeState(data []byte) (preConfig shardctrler.Config, currC
 // RPCs to the shardctrler.
 //
 // make_end(servername) turns a server name from a
-// LastConfig.Groups[gid][i] into a labrpc.ClientEnd on which you can
+// ConfiguredConfig.Groups[gid][i] into a labrpc.ClientEnd on which you can
 // send RPCs. You'll need this to send RPCs to other groups.
 //
 // look at client.go for examples of how to use ctrlers[]
@@ -379,7 +382,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
 	labgob.Register(shardctrler.Config{})
-	labgob.Register(State{})
+	labgob.Register(KVState{})
+	labgob.Register(PartialConfiguration{})
 	labgob.Register(KeyValue{})
 	labgob.Register(GetState{})
 	labgob.Register(ConfigState{})
@@ -408,14 +412,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.handlerByClientId = make(map[int64]*ClientHandler)
 	kv.lastAppliedIndex = 0
 	kv.persister = persister
-	kv.CurrState = State{
+	kv.CurrState = KVState{
 		ConfiguredNum:         0,
 		KVMap:                 make(map[string]string),
 		LastAppliedCommandMap: make(map[int64]ExecutedOp),
 	}
 	kv.PreConfig = shardctrler.Config{}
 	kv.CurrConfig = shardctrler.Config{}
-	kv.GetStateMap = make(map[int]State)
+	kv.GetStateMap = make(map[int]KVState)
 
 	//for k := range kv.handlerByShard {
 	//	kv.handlerByShard[k] = make(map[int64]*ClientHandler)
@@ -478,8 +482,8 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 				keyShard := key2shard(keyValue.Key)
 				if kv.CurrConfig.Num != kv.PreConfig.Num && kv.AffectShards[keyShard] == true {
 					result = ErrNotAvailableYet
-					kv.logger.Printf("%v-%v: current configuring, curr=%v, pre=%v, unable to handle command: %v.\n", kv.gid, kv.me, kv.CurrConfig, kv.PreConfig, command)
-				} else if configGid := kv.CurrConfig.Shards[keyShard]; configGid != kv.gid {
+					kv.logger.Printf("%v-%v: current configuring, curr=%v, pre=%v, affected=%v, shard=%v, unable to handle command: %v.\n", kv.gid, kv.me, kv.CurrConfig, kv.PreConfig, kv.AffectShards, keyShard, command)
+				} else if configGid := kv.PreConfig.Shards[keyShard]; configGid != kv.gid {
 					result = ErrWrongGroup
 					kv.logger.Printf("%v-%v: wrong group, unable to handle command: %v, keyShard=%v, configGid=%v.\n", kv.gid, kv.me, command, keyShard, configGid)
 				} else {
@@ -493,18 +497,15 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 					}
 				}
 			case OpType_GET_STATE:
-				// check lose shard ownership
-
 				getState := command.ExtraArgs.(GetState)
 				if getState.Confirm {
-					getStateOK := command.ExtraArgs.(GetState)
-					for _, shard := range getStateOK.Shards {
+					for _, shard := range getState.Shards {
 						state, present := kv.GetStateMap[shard]
 						if !present {
 							kv.logger.Printf("%v-%v: unable to confirm get, not exist shard %v, getStateMap=%v.\n", kv.gid, kv.me, shard, kv.GetStateMap)
 							result = ErrShardDelete
-						} else if state.ConfiguredNum != getStateOK.ConfigNum {
-							kv.logger.Printf("%v-%v: unable to confirm get, configure num != %v, getStateMap=%v.\n", kv.gid, kv.me, getStateOK.ConfigNum, kv.GetStateMap)
+						} else if state.ConfiguredNum != getState.ConfigNum {
+							kv.logger.Panicf("%v-%v: unable to confirm get, configure num != %v, getStateMap=%v.\n", kv.gid, kv.me, getState.ConfigNum, kv.GetStateMap)
 							result = ErrShardDelete
 						} else {
 							delete(kv.GetStateMap, shard)
@@ -512,7 +513,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 						}
 					}
 					if result == nil {
-						result = State{}
+						result = KVState{}
 					}
 				} else {
 					getStateKVMap := make(map[string]string)
@@ -537,7 +538,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 						}
 					}
 					if result == nil {
-						result = State{
+						result = KVState{
 							ConfiguredNum:         getState.ConfigNum,
 							KVMap:                 getStateKVMap,
 							LastAppliedCommandMap: getStateAppliedMap,
@@ -558,7 +559,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 						} else if lastGid == kv.gid && currGid != kv.gid {
 							element, present := kv.GetStateMap[shard]
 							if present {
-								kv.logger.Panicf("%v-%v: try to make a map of shard %v, but already exist, element=%v, command=%v, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, shard, command, element, kv.PreConfig, kv.CurrConfig)
+								kv.logger.Panicf("%v-%v: try to make a map of shard %v, but already exist, command=%v, element={%v}, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, shard, command, element, kv.PreConfig, kv.CurrConfig)
 							}
 							getStateKVMap := make(map[string]string)
 							getStateAppliedMap := make(map[int64]ExecutedOp)
@@ -575,13 +576,13 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 									delete(kv.CurrState.LastAppliedCommandMap, key)
 								}
 							}
-							state := State{
+							state := KVState{
 								ConfiguredNum:         kv.CurrConfig.Num,
 								KVMap:                 getStateKVMap,
 								LastAppliedCommandMap: getStateAppliedMap,
 							}
 							kv.GetStateMap[shard] = state
-							kv.AffectShards[shard] = true
+							kv.AffectShards[shard] = false
 							kv.logger.Printf("%v-%v: lost ownership of shard %v, make map, new_gid=%v, make_state=%v.\n", kv.gid, kv.me, shard, currGid, state)
 						} else {
 							kv.AffectShards[shard] = false
@@ -604,25 +605,58 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 					result = ConfigState{false, kv.PreConfig.Num == kv.CurrConfig.Num, kv.CurrConfig}
 				}
 			case OpType_RECONFIGURED:
-				state := command.ExtraArgs.(State)
-				if kv.CurrConfig.Num == kv.PreConfig.Num && kv.CurrConfig.Num == state.ConfiguredNum {
-					kv.logger.Printf("%v-%v: configured accept(duplicated). state=%v, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, state, kv.CurrConfig, kv.PreConfig)
-				} else if kv.CurrConfig.Num == kv.PreConfig.Num && kv.CurrConfig.Num != state.ConfiguredNum {
-					kv.logger.Printf("%v-%v: current is not configuring status. state=%v, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, state, kv.CurrConfig, kv.PreConfig)
+				partialState := command.ExtraArgs.(PartialConfiguration)
+				if kv.CurrConfig.Num == kv.PreConfig.Num && kv.CurrConfig.Num == partialState.ConfiguredNum {
+					kv.logger.Printf("%v-%v: configured accept(duplicated). partialState={%v}, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, partialState, kv.CurrConfig, kv.PreConfig)
+					var missingShards []int
+					for shard, isAffected := range kv.AffectShards {
+						if isAffected {
+							missingShards = append(missingShards, shard)
+						}
+					}
+					result = missingShards
+				} else if kv.CurrConfig.Num == kv.PreConfig.Num && kv.CurrConfig.Num != partialState.ConfiguredNum {
+					kv.logger.Printf("%v-%v: current is not configuring status. partialState={%v}, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, partialState, kv.CurrConfig, kv.PreConfig)
 					result = ErrMatchConfigured
-				} else if kv.PreConfig.Num != state.ConfiguredNum {
-					kv.logger.Printf("%v-%v: configured not matched. state=%v, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, state, kv.CurrConfig, kv.PreConfig)
+				} else if kv.PreConfig.Num != partialState.ConfiguredNum {
+					kv.logger.Printf("%v-%v: configured not matched. partialState={%v}, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, partialState, kv.CurrConfig, kv.PreConfig)
 					result = ErrMatchConfigured
 				} else {
-					for key, value := range state.KVMap {
-						kv.CurrState.KVMap[key] = value
+					duplicated := false
+					for _, shard := range partialState.Shards {
+						if kv.AffectShards[shard] == true {
+							kv.AffectShards[shard] = false
+						} else {
+							duplicated = true
+							break
+						}
 					}
-					for key, value := range state.LastAppliedCommandMap {
-						kv.CurrState.LastAppliedCommandMap[key] = value
+
+					var missingShards []int
+					for shard, isAffected := range kv.AffectShards {
+						if isAffected {
+							missingShards = append(missingShards, shard)
+						}
 					}
-					kv.CurrConfig = kv.PreConfig
+					result = missingShards
+
+					if duplicated {
+						kv.logger.Printf("%v-%v: receive duplicated partialState, already updated. partialState={%v}, curr_config=%v, pre_config=%v, affected_shards=%v.\n", kv.gid, kv.me, partialState, kv.CurrConfig, kv.PreConfig, kv.AffectShards)
+					} else {
+						for key, value := range partialState.KVMap {
+							kv.CurrState.KVMap[key] = value
+						}
+						for key, value := range partialState.LastAppliedCommandMap {
+							kv.CurrState.LastAppliedCommandMap[key] = value
+						}
+						if len(missingShards) == 0 {
+							kv.CurrConfig = kv.PreConfig
+							kv.logger.Printf("%v-%v: missingShards is empty, update CurrConfig.Num to %v.\n", kv.gid, kv.me, kv.CurrConfig.Num)
+						} else {
+							kv.logger.Printf("%v-%v: still wait for state, missingShards=%v, partialState=%v.\n", kv.gid, kv.me, missingShards, partialState)
+						}
+					}
 				}
-				kv.logger.Printf("%v-%v: update CurrConfig.Num to %v.\n", kv.gid, kv.me, kv.CurrConfig.Num)
 
 			}
 			lastAppliedCommand = NewExecuteOp(command, result)
