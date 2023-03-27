@@ -128,9 +128,9 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 			preGid := preConfig.Shards[shard]
 			if configuredGid != 0 && configuredGid != ck.gid && preGid == ck.gid {
 				gid2shards[configuredGid] = append(gid2shards[configuredGid], shard)
-				ck.logger.Printf("%v-%v: gain ownership of shard %v, gid=%v.\n", ck.gid, ck.me, shard, configuredGid)
+				ck.logger.Printf("%v-%v: gain ownership of shard %v, configuredConfig=%v, gid=%v.\n", ck.gid, ck.me, shard, configuredConfig, configuredGid)
 			} else if configuredGid == ck.gid && preGid != ck.gid {
-				ck.logger.Printf("%v-%v: lost ownership of shard %v, new_gid=%v.\n", ck.gid, ck.me, shard, preGid)
+				ck.logger.Printf("%v-%v: lost ownership of shard %v, configuredConfig=%v, new_gid=%v.\n", ck.gid, ck.me, configuredConfig, shard, preGid)
 			}
 		}
 		if len(gid2shards) > 0 {

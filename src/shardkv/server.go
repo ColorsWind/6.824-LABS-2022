@@ -555,11 +555,11 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 						currGid := newConfig.Shards[shard]
 						if lastGid != 0 && lastGid != kv.gid && currGid == kv.gid {
 							kv.AffectShards[shard] = true
-							kv.logger.Printf("%v-%v: gain ownership of shard %v, gid=%v.\n", kv.gid, kv.me, shard, lastGid)
+							kv.logger.Printf("%v-%v: gain ownership of shard %v, currConfig=%v, gid=%v.\n", kv.gid, kv.me, shard, kv.CurrConfig, lastGid)
 						} else if lastGid == kv.gid && currGid != kv.gid {
 							element, present := kv.GetStateMap[shard]
 							if present {
-								kv.logger.Panicf("%v-%v: try to make a map of shard %v, but already exist, command=%v, element={%v}, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, shard, command, element, kv.PreConfig, kv.CurrConfig)
+								kv.logger.Printf("%v-%v: try to make a map of shard %v, but already exist, command=%v, element={%v}, pre_config=%v, curr_config=%v.\n", kv.gid, kv.me, shard, command, element, kv.PreConfig, kv.CurrConfig)
 							}
 							getStateKVMap := make(map[string]string)
 							getStateAppliedMap := make(map[int64]ExecutedOp)
@@ -583,7 +583,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 							}
 							kv.GetStateMap[shard] = state
 							kv.AffectShards[shard] = false
-							kv.logger.Printf("%v-%v: lost ownership of shard %v, make map, new_gid=%v, make_state=%v.\n", kv.gid, kv.me, shard, currGid, state)
+							kv.logger.Printf("%v-%v: lost ownership of shard %v, currConfig=%v, make map, new_gid=%v, make_state={%v}.\n", kv.gid, kv.me, shard, kv.CurrConfig, currGid, state)
 						} else {
 							kv.AffectShards[shard] = false
 						}
