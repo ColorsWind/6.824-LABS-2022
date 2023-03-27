@@ -26,4 +26,4 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: MapReduce Log
-          path: mr_output.log
+          path: ${{ github.workspace }}/mr_output.log

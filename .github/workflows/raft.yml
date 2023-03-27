@@ -35,7 +35,7 @@ jobs:
         with:
           paths: |
             ${{ github.workspace }}/src/raft/raft_report.xml
-            ${{ github.workspace }}//kvraft/kvraft_report.xml
+            ${{ github.workspace }}/src/kvraft/kvraft_report.xml
             ${{ github.workspace }}/src/shardctrler/shardctrler_report.xml
             ${{ github.workspace }}/src/shardkv/shardkv_report.xml
         if: always()
