@@ -107,7 +107,7 @@ func reBalance(items GroupItemList) (balancedItems GroupItemList) {
 }
 
 // when LEAVE, need to pass gidList
-func shardToGroupItemList(shards [10]int, gidList []int) GroupItemList {
+func shardToGroupItemList(shards [NShards]int, gidList []int) GroupItemList {
 	gidToShards := make(map[int][]int)
 	for _, gid := range gidList {
 		gidToShards[gid] = []int{}
