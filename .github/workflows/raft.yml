@@ -27,7 +27,7 @@ jobs:
           export GOPATH="$HOME/go/"
           export PATH=$PATH:$GOPATH/bin
           cd ${{ github.workspace }}/src/raft/        && go test -v | go-junit-report -set-exit-code -iocopy -out raft_report.xml
-          cd ${{ github.workspace }}//kvraft/      && go test -v | go-junit-report -set-exit-code -iocopy -out kvraft_report.xml
+          cd ${{ github.workspace }}/src/kvraft/      && go test -v | go-junit-report -set-exit-code -iocopy -out kvraft_report.xml
           cd ${{ github.workspace }}/src/shardctrler/ && go test -v | go-junit-report -set-exit-code -iocopy -out shardctrler_report.xml
           cd ${{ github.workspace }}/src/shardkv/     && go test -v | go-junit-report -set-exit-code -iocopy -out shardkv_report.xml
       - name: Test Summary
