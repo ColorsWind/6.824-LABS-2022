@@ -5,7 +5,6 @@ import (
 	"6.824/shardctrler"
 	"log"
 	"os"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -17,10 +16,10 @@ type ConfigureClerk struct {
 	mck      *shardctrler.Clerk
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
-	getStateClientId   int64 // random id, should be unique globally
-	configureClientId  int64
-	getStateCommandId  int64 // for a client, monotonically increase from 0
-	configureCommandId int64
+	configureClientId  int64 // random id, should be unique globally
+	configureCommandId int64 // for a client, monotonically increase from 0
+	getStateClientId   [shardctrler.NShards]int64
+	getStateCommandId  [shardctrler.NShards]int64
 	logger             *log.Logger
 	kv                 *ShardKV
 	me                 int
@@ -36,9 +35,11 @@ func MakeConfigureClerk(kv *ShardKV) *ConfigureClerk {
 	ck.kv = kv
 	ck.mck = shardctrler.MakeClerk(kv.ctrlers)
 	ck.make_end = kv.make_end
-	ck.getStateClientId = nrand()
 	ck.configureClientId = nrand()
-	atomic.StoreInt64(&ck.getStateCommandId, 0)
+	for shard := range ck.getStateClientId {
+		ck.getStateClientId[shard] = nrand()
+	}
+
 	ck.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
 	ck.me = kv.me
 	ck.gid = kv.gid
@@ -132,29 +133,21 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 				ck.logger.Printf("%v-%v: lost ownership of shard %v, new_gid=%v.\n", ck.gid, ck.me, shard, preGid)
 			}
 		}
-		mu := sync.Mutex{}
 		if len(gid2shards) > 0 {
 			ch := make(chan int)
 			for gid, shards := range gid2shards {
 				gid := gid
 				shards := shards
 				go func() {
-					mu.Lock()
-					// FIXME: use different client id to get state concurrent
 					state, err := ck.sendGetState(configuredConfig, gid, shards, false)
-					mu.Unlock()
 					switch err {
 					case OK:
 						ck.logger.Printf("%v-%v: get state success, gid=%v, shards=%v.\n", ck.gid, ck.me, gid, shards)
-						mu.Lock()
 						missing, err := ck.sendReConfigured(PartialConfiguration{shards, KVState{preConfig.Num, state.KVMap, state.LastAppliedCommandMap}})
-						mu.Unlock()
 						ck.logger.Printf("%v-%v: re-configured, shards=%v, missing=%v, err=%v.\n", ck.gid, ck.me, shards, missing, err)
 						if err == OK {
 							ch <- len(missing)
-							mu.Lock()
 							_, err = ck.sendGetState(configuredConfig, gid, shards, true)
-							mu.Unlock()
 							ck.logger.Printf("%v-%v: get state confirm, err=%v.\n", ck.gid, ck.me, err)
 						} else {
 							ch <- -1
@@ -198,7 +191,7 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 
 func (ck *ConfigureClerk) sendGetState(lastConfig shardctrler.Config, gid int, shards []int, confirm bool) (state KVState, err Err) {
 	ck.logger.Printf("%v-%v: GetState. gid=%v, shards=%v.\n", ck.gid, ck.me, gid, shards)
-	args := GetStateArgs{Identity{ck.getStateClientId, atomic.AddInt64(&ck.getStateCommandId, 1)}, GetState{lastConfig.Num, shards, confirm}}
+	args := GetStateArgs{Identity{ck.getStateClientId[shards[0]], atomic.AddInt64(&ck.getStateCommandId[shards[0]], 1)}, GetState{lastConfig.Num, shards, confirm}}
 	for {
 		//gid := kv.ctrlerConfig.Shards[shard]
 		if servers, ok := lastConfig.Groups[gid]; ok {
@@ -207,7 +200,7 @@ func (ck *ConfigureClerk) sendGetState(lastConfig shardctrler.Config, gid int, s
 				srv := ck.make_end(servers[si])
 				var reply GetStateReply
 				ok := srv.Call("ShardKV.GetState", &args, &reply)
-				ck.logger.Printf("%v-%v call get finishM server=%v, args=%v, reply=%v, ok=%v.\n", ck.gid, ck.me, servers[si], args, reply, ok)
+				ck.logger.Printf("%v-%v call get finish, server='%v', args=%v, reply=%v, ok=%v.\n", ck.gid, ck.me, servers[si], args, reply, ok)
 				if ok && (reply.Err == OK || reply.Err == ErrShardDelete) {
 					// successfully get state
 					ck.logger.Printf("%v-%v: finish get state ok, args=%v, reply=%v.", ck.gid, ck.me, args, reply)

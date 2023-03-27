@@ -521,11 +521,11 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 					for _, shard := range getState.Shards {
 						state, present := kv.GetStateMap[shard]
 						if !present {
-							kv.logger.Printf("%v-%v: unable to get state, not exist shard %v, getStateMap=%v.\n", kv.gid, kv.me, shard, kv.GetStateMap)
+							kv.logger.Printf("%v-%v: unable to get state, not exist shard %v, getStateMap=%v, currConfig=%v.\n", kv.gid, kv.me, shard, kv.GetStateMap, kv.CurrConfig)
 							result = ErrShardDelete
 							break
 						} else if state.ConfiguredNum != getState.ConfigNum {
-							kv.logger.Printf("%v-%v: unable to get state, configure num != %v, getStateMap=%v.\n", kv.gid, kv.me, getState.ConfigNum, kv.GetStateMap)
+							kv.logger.Printf("%v-%v: unable to get state, configure num != %v, getStateMap=%v, currConfig=%v.\n", kv.gid, kv.me, getState.ConfigNum, kv.GetStateMap, kv.CurrConfig)
 							result = ErrShardDelete
 							break
 						} else {
