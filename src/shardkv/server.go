@@ -267,7 +267,6 @@ func (kv *ShardKV) GetState(args *GetStateArgs, reply *GetStateReply) {
 func (kv *ShardKV) ReConfiguring(args *ReConfiguringArgs, reply *ReConfiguringReply) {
 	result, err := kv.handleRequest(args.Identity, OpType_RECONFIGURING, args.Config)
 	reply.Err = err
-	fmt.Printf("%v, %v\n", result, err)
 	if err == OK {
 		reply.ConfigState = result.(ConfigState)
 	}
@@ -435,10 +434,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go func() {
 		cck := MakeConfigureClerk(kv)
 		for !kv.killed() {
-			t1 := time.Now().UnixMilli()
+			//t1 := time.Now().UnixMilli()
 			cck.onPollConfiguration()
-			t2 := time.Now().UnixMilli()
-			time.Sleep(time.Duration(100-(t2-t1)) * time.Millisecond)
+			//t2 := time.Now().UnixMilli()
+			time.Sleep(100 * time.Millisecond)
 		}
 	}()
 	return kv
