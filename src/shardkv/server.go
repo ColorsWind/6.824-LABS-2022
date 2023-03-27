@@ -445,10 +445,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 	kv.logger.Printf("%v-%v: Receive msg: %v.\n", kv.gid, kv.me, msg)
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	if msg.SnapshotValid {
-		kv.mu.Unlock()
 		for {
 			if !msg.SnapshotValid && !msg.CommandValid {
 				kv.logger.Printf("%v-%v: detect applyCh close while receive snapshot, return, msg=%v.\n", kv.gid, kv.me, msg)
@@ -460,6 +457,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			msg = <-kv.applyCh
 		}
 		kv.mu.Lock()
+		defer kv.mu.Unlock()
 		// receive snapshot indicate is not leader
 		kv.PreConfig, kv.ConfiguredConfig, kv.CurrState, kv.GetStateMap, kv.AffectShards = kv.decodeState(msg.Snapshot)
 		kv.lastAppliedIndex = msg.SnapshotIndex
@@ -476,6 +474,8 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 		}
 		kv.logger.Printf("%v-%v: update lastAppliedIndex: %v\n", kv.gid, kv.me, kv.CurrState.LastAppliedCommandMap)
 	} else if msg.CommandValid {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
 		command := msg.Command.(Op)
 		lastAppliedCommand := kv.CurrState.LastAppliedCommandMap[command.ClientId]
 		// update state machine
@@ -702,13 +702,15 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 		}
 		kv.lastAppliedIndex = msg.CommandIndex
 
+		if kv.maxraftstate > 0 && kv.persister.RaftStateSize() > kv.maxraftstate {
+			kv.logger.Printf("%v-%v: raft state size greater maxraftstate(%v > %v), trim log.\n", kv.gid, kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
+			snapshot := kv.encodeState(kv.PreConfig, kv.ConfiguredConfig, kv.CurrState, kv.GetStateMap, kv.AffectShards)
+			kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
+		}
+
 	} else {
 		kv.logger.Printf("%v-%v: detect applyCh close, return, msg=%v.\n", kv.gid, kv.me, msg)
 		return
 	}
-	if kv.maxraftstate > 0 && kv.persister.RaftStateSize() > kv.maxraftstate {
-		kv.logger.Printf("%v-%v: raft state size greater maxraftstate(%v > %v), trim log.\n", kv.gid, kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
-		snapshot := kv.encodeState(kv.PreConfig, kv.ConfiguredConfig, kv.CurrState, kv.GetStateMap, kv.AffectShards)
-		kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
-	}
+
 }
