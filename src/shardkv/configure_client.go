@@ -4,7 +4,6 @@ import (
 	"6.824/labrpc"
 	"6.824/shardctrler"
 	"log"
-	"os"
 	"sync/atomic"
 	"time"
 )
@@ -40,7 +39,7 @@ func MakeConfigureClerk(kv *ShardKV) *ConfigureClerk {
 		ck.mutipleClientId[shard] = nrand()
 	}
 
-	ck.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
+	ck.logger = kv.logger
 	ck.me = kv.me
 	ck.gid = kv.gid
 	ck.preConfigNum = 0
