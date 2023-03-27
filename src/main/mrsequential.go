@@ -35,6 +35,8 @@ func main() {
 	// pass it to Map,
 	// accumulate the intermediate Map output.
 	//
+
+	log.SetOutput(ioutil.Discard)
 	intermediate := []mr.KeyValue{}
 	for _, filename := range os.Args[2:] {
 		file, err := os.Open(filename)

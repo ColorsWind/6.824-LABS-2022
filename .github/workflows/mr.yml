@@ -1,0 +1,24 @@
+name: Test MapReduce
+on:
+  push:
+    branches:
+      - ci
+      - main
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+jobs:
+  tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout GitHub Action
+        uses: actions/checkout@v3
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.18
+      - name: Run Test
+        run: |
+          cd ${{ github.workspace }}/src/main && bash test-mr.sh
