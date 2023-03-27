@@ -448,12 +448,18 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	if msg.SnapshotValid {
+		kv.mu.Unlock()
 		for {
+			if !msg.SnapshotValid && !msg.CommandValid {
+				kv.logger.Printf("%v-%v: detect applyCh close while receive snapshot, return, msg=%v.\n", kv.gid, kv.me, msg)
+				return
+			}
 			if msg.SnapshotValid && kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.CommandIndex, msg.Snapshot) {
 				break
 			}
 			msg = <-kv.applyCh
 		}
+		kv.mu.Lock()
 		// receive snapshot indicate is not leader
 		kv.PreConfig, kv.ConfiguredConfig, kv.CurrState, kv.GetStateMap, kv.AffectShards = kv.decodeState(msg.Snapshot)
 		kv.lastAppliedIndex = msg.SnapshotIndex

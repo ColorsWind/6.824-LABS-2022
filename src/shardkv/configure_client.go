@@ -53,6 +53,7 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 	// !!Important: carefully reuse clientId, as we assume one time, one RPC per client
 
 	queryConfig := ck.mck.Query(-1)
+	//ck.logger.Printf("%v-%v: query config = %v.\n", ck.gid, ck.me, queryConfig)
 	if queryConfig.Num < ck.preConfigNum {
 		ck.logger.Panicf("%v-%v: queryConfig.Num < ck.conf.ConfiguredConfig.Num, something went wrong, queryConfig=%v, conf=%v\n", ck.gid, ck.me, queryConfig, ck.preConfigNum)
 	}
@@ -65,6 +66,9 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 	configuredConfig := configState.ConfiguredConfig
 	if err != OK {
 		ck.logger.Printf("%v-%v: do Re-Completed fail, Err=%v.\n", ck.gid, ck.me, err)
+		if err == ErrWrongLeader {
+			time.Sleep(100 * time.Millisecond)
+		}
 		return
 	}
 
