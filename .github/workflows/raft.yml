@@ -1,3 +1,13 @@
+on:
+  push:
+    branches:
+      - ci
+      - main
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    paths-ignore:
+      - '**.md'
 jobs:
   tests:
     runs-on: ubuntu-22.04
