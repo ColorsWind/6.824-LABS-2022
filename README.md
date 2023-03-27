@@ -5,7 +5,7 @@
 - [x] Lab 1: MapReduce
 - [x] Lab 2: Raft
 - [x] Lab 3: Fault-tolerant Key/Value Service
-- [ ] Lab 4: Sharded Key/Value Service
+- [x] Lab 4: Sharded Key/Value Service (+ challenge exercises)
 
 ## Lab1  MapReduce
 
@@ -68,13 +68,74 @@
 
 1. 需要正确处理`kill()`，保证所有goroutine在合理的时间内结束，注意各种边界情况
 2. 重新设计数据结构：
-   1. clientRequest map[client_id] request_handler **volatile**
-   2. lastAppliedCommand map[client_id] command **persistent**
+   - clientRequest map[client_id] request_handler **volatile**
+   
+   - lastAppliedCommand map[client_id] command **persistent**
 
 
 
 **Lab 4: Sharded Key/Value Service**
 
+*4A*
+
+1. 代码框架和kvraft基本相同，且需要实现kvraft的快照部分；
+
+1. 要求在`Join`和`Leave`后重新平衡Shard的分配，需要实现一个分配算法，一种可能的实现是：
+
+   ```go
+   type GroupItem struct {
+   	gid    int
+   	shards []int
+   }
+   type GroupItemList []GroupItem
+   
+   func reBalance(items GroupItemList) (balancedItems GroupItemList)
+   func shardToGroupItemList(shards [NShards]int, gidList []int) GroupItemList
+   func groupItemListToShard(gil GroupItemList) (shards [NShards]int, groupN int)
+   ```
+
+   需要考虑两个细节：
+
+   - gid=1意味着shard没有被分配给Group；
+   - 多于NShards个Group时，Shards中仅会出现这些Group的一部分；
+
+2. 平衡Shard的算法必须是一个确定性（deterministic）的算法。一个不确定的可能来源是对map的遍历，可以先排序再遍历；
+
+3. 编写单元测试是一个好习惯，在单元测试中可以设定伪随机数seed，多次重复生成（生成的对象内存地址不同，但是相等），测试算法的确定性。
+
 *4B*
 
-1. 要求提到：当shardkv发现失去shard的ownership之后要**立即**停止处理客户端请求，因为Group可能发现故障无法达成共识，客户端也可能在reply丢失的情况下新的Group请求。更重要的是，新的Group可能开始处理客户端请求。
+1. （TestStaticShards）需要仔细考虑哪些部分属于状态机的状态（state），为了确保一致性，对Shard所有权的检查，ReConfiguration生效的时间点的确定应该在`onApplyChMsg`中进行；
+
+2. （TestJoinLeave）为了避免两个Group交换数据时可能产生死锁，可以按照配置文件生效的情况划分shardkv的状态，例如：
+
+   - Sn：编号为n的Configuration已生效，可以处理GET/PUT/APPEND请求（需检查Group），接受一个ReConfiguring请求可以转化为C(n+1)；
+   - C(n+1)：编号为(n+1)的Configuration生效中，拒绝所有GET/PUT/APPEND请求，可以一个ReConfigured请求转化为S(n+1)；
+   - 在实现过程中，可以新增两个状态ConfiguredConfig和PreConfig记录两个Config实现；
+
+3. （TestConcurrent1,2,3）需要定期检查Configuration，一种可能的实现是：
+
+   - Query(-1)获取最新的Configuration；
+   - 通过ReConfiguring是否成功，以及返回值“猜测”shardkv当前的ConfiguredConfig和PreConfig实现；
+   - 如果得到了新的shard的所有权，GetState获取；
+   - 发送ReConfigured（附上GetState结果）；
+
+   需要考虑的因素包括：
+
+   - 为了保证能找到正确的Group，且在ReConfiguration的过程中不丢失信息，应当严格按照(2)的状态转移，只允许shardkv中的Configuration编号每次增加1，由于存在GetState的依赖关系，我们实现了一个LockStep的系统，两个Group中的Configuration编号不会相差太远，这样可以简化我们GetState的实现；
+   - 如果ReConfiguration调用频繁，shardkv不一定能接受Query(-1)的Configuration（查询结果太新），这时候要根据返回值猜测shardkv当前的CurrConfiguration并尝试CurrConfiguration + 1；
+   - 仅在`onApplyChMsg`可以保证原子性，在其他函数中任意两条语句中都有可能发送ReConfigure，相关逻辑应当全面考虑这些情况。ReConfigure的相关op必须是幂等的，如果op失败，返回false；如果操作成功，或者允许op但是op已经执行不需要重复执行也返回true；
+   - 在shardctrler和raftkv中，均使用全局唯一ClientId+自增CommandId实现GET/PUT/APPEND的duplicate检测，但对于ReConfigure相关op应当使用ConfigNum来检测；需要独立的逻辑不能复用前述逻辑（例如使用ConfigNum生成CommandId），原因包括：ReConfigure相关op可能由多个Client调用，ReConfigure相关op可能执行失败；
+   - 考虑上述所有因素，pollConfiguration相关实现可能会较复杂，应当从server.go中独立出来，在我的实现中相关代码在configure_client.go中；
+
+4. （TestChallenge1Delete）当G1失去shard=x的所有权时，在[NShards]State数组中存储shard的。增加一种RPC类型GetStateOK，执行顺序为：G1向G2请求GetState，然后G2提交ReConfigured成功；然后G2向G1发送GetStateOK，然后G1删除相应状态。其中的一些细节：
+
+   - GetState和ReConfigured需要确保执行成功，GetStateOK不需要保证成功（事实上也没办法保证执行成功，有G2内的所有shardkv都可以执行上述过程）；
+   - 如果G1再次失去shard=x的所有权时，可以直接覆盖State[x]（如果G1可以失去shard=x的所有权，G1必然从另一个Group获取shard=x的所有权，因此State[x]可以确保已被确认收到；
+
+5. （TestChallenge2Unaffected）在shardkv中使用[shardctrler.NShards]bool存储AffectShards，在(2)中的检查中排除即可；
+
+6. （TestChallenge2Partial）复用(5)中的AffectShards，将一个ReConfigured拆分为多个，当AffectShards全为false时状态Sn -> Cn，其中一些细节：
+
+   - GetState必须并行发送，避免一个Group的故障影响对其他Group的GetState的执行；
+   - 在configure_client.go中需要维护多个ClientId和CommandId，必须保证一个ClientId同一时刻只能发送一个RPC请求。
