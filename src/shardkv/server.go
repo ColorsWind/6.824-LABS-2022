@@ -5,6 +5,7 @@ import (
 	"6.824/shardctrler"
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"sync/atomic"
@@ -404,7 +405,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
-	//kv.logger.SetOutput(ioutil.Discard)
+	kv.logger.SetOutput(ioutil.Discard)
 
 	// You may need initialization code here.
 
