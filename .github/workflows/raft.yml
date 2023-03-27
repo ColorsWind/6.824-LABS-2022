@@ -1,3 +1,4 @@
+name: Test Raft
 on:
   push:
     branches:
