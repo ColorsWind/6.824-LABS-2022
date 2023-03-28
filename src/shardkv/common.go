@@ -207,7 +207,7 @@ func getLogOutput() *os.File {
 		globalLog.mu.Lock()
 		defer globalLog.mu.Unlock()
 		if globalLog.fi == nil {
-			fi, err := os.OpenFile(output, os.O_WRONLY|os.O_TRUNC, os.ModeAppend)
+			fi, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 			if err != nil {
 				log.Panicf("Error open log file: %v.", output)
 			}
