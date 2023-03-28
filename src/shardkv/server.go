@@ -438,10 +438,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		cck := MakeConfigureClerk(kv)
 		kv.logger.Printf("%v-%v: onPollConfiguration start, name=%v.\n", kv.gid, kv.me, goroutineName())
 		for !kv.killed() {
-			//t1 := time.Now().UnixMilli()
+			t1 := time.Now().UnixMilli()
 			cck.onPollConfiguration()
-			//t2 := time.Now().UnixMilli()
-			time.Sleep(100 * time.Millisecond)
+			t2 := time.Now().UnixMilli()
+			time.Sleep(time.Duration(100-(t2-t1)) * time.Millisecond)
 		}
 	}()
 	return kv

@@ -65,9 +65,9 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 	configuredConfig := configState.ConfiguredConfig
 	if err != OK {
 		ck.logger.Printf("%v-%v: do Re-Completed fail, Err=%v.\n", ck.gid, ck.me, err)
-		if err == ErrWrongLeader {
-			time.Sleep(100 * time.Millisecond)
-		}
+		//if err == ErrWrongLeader {
+		//	time.Sleep(100 * time.Millisecond)
+		//}
 		return
 	}
 
