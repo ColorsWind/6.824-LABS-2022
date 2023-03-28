@@ -29,6 +29,7 @@ jobs:
           cd ${{ github.workspace }}/src/raft/        && go test -v | go-junit-report -set-exit-code -iocopy -out raft_report.xml
           cd ${{ github.workspace }}//kvraft/      && go test -v | go-junit-report -set-exit-code -iocopy -out kvraft_report.xml
           cd ${{ github.workspace }}/src/shardctrler/ && go test -v | go-junit-report -set-exit-code -iocopy -out shardctrler_report.xml
+          export shardkv_output="${{ github.workspace }}/shardkv.log"
           cd ${{ github.workspace }}/src/shardkv/     && go test -v | go-junit-report -set-exit-code -iocopy -out shardkv_report.xml
       - name: Test Summary
         uses: test-summary/action@v2
@@ -39,3 +40,8 @@ jobs:
             ${{ github.workspace }}/src/shardctrler/shardctrler_report.xml
             ${{ github.workspace }}/src/shardkv/shardkv_report.xml
         if: always()
+      - name: Upload log
+        uses: actions/upload-artifact@v3
+        with:
+          name: ShardKV Log
+          path: ${{ github.workspace }}/shardkv.log

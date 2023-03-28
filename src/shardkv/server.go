@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"os"
+	"runtime"
 	"sync/atomic"
 	"time"
 )
@@ -115,6 +115,14 @@ type ShardKV struct {
 	PreConfig        shardctrler.Config
 	GetStateMap      map[int]KVState
 	AffectShards     [shardctrler.NShards]bool
+}
+
+func goroutineName() string {
+	buf := make([]byte, 100)
+	runtime.Stack(buf, true)
+	buf = bytes.Split(buf, []byte{'\n'})[0]
+	buf = buf[:len(buf)-1]
+	return string(bytes.TrimSuffix(buf, []byte("[running]")))
 }
 
 // Only handle OpType_GET, OpType_PUT, OpType_APPEND, OpType_GET_STATE
@@ -398,8 +406,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
-	//kv.logger.SetOutput(ioutil.Discard)
+	kv.logger = log.New(getLogOutput(), "", log.Lshortfile|log.Lmicroseconds)
 
 	// You may need initialization code here.
 
@@ -419,8 +426,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	//	kv.handlerByShard[k] = make(map[int64]*ClientHandler)
 	//}
 
-	kv.logger.Printf("%v-%v: shardkv startup.\n", kv.gid, kv.me)
+	kv.logger.Printf("%v-%v: shardkv startup, name=%v.\n", kv.gid, kv.me, goroutineName())
 	go func() {
+		kv.logger.Printf("%v-%v: onApplyMsg start, name=%v.\n", kv.gid, kv.me, goroutineName())
 		for !kv.killed() {
 			msg := <-kv.applyCh
 			kv.onApplyMsg(msg)
@@ -428,6 +436,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	}()
 	go func() {
 		cck := MakeConfigureClerk(kv)
+		kv.logger.Printf("%v-%v: onPollConfiguration start，name=%v.\n", kv.gid, kv.me, goroutineName())
 		for !kv.killed() {
 			//t1 := time.Now().UnixMilli()
 			cck.onPollConfiguration()
@@ -607,13 +616,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 				partialState := command.ExtraArgs.(PartialConfiguration)
 				if kv.ConfiguredConfig.Num == kv.PreConfig.Num && kv.ConfiguredConfig.Num == partialState.ConfiguredNum {
 					kv.logger.Printf("%v-%v: configured accept(duplicated). partialState={%v}, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, partialState, kv.ConfiguredConfig, kv.PreConfig)
-					var missingShards []int
-					for shard, isAffected := range kv.AffectShards {
-						if isAffected {
-							missingShards = append(missingShards, shard)
-						}
-					}
-					result = missingShards
+					result = []int{}
 				} else if kv.ConfiguredConfig.Num == kv.PreConfig.Num && kv.ConfiguredConfig.Num != partialState.ConfiguredNum {
 					kv.logger.Printf("%v-%v: current is not configuring status. partialState={%v}, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, partialState, kv.ConfiguredConfig, kv.PreConfig)
 					result = ErrMatchConfigured
@@ -621,14 +624,18 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 					kv.logger.Printf("%v-%v: configured not matched. partialState={%v}, curr_config=%v, pre_config=%v.\n", kv.gid, kv.me, partialState, kv.ConfiguredConfig, kv.PreConfig)
 					result = ErrMatchConfigured
 				} else {
-					duplicated := false
-					for _, shard := range partialState.Shards {
-						if kv.AffectShards[shard] == true {
+					var duplicated bool
+					if len(partialState.Shards) > 0 {
+						fetched := kv.AffectShards[partialState.Shards[0]]
+						for _, shard := range partialState.Shards {
+							if kv.AffectShards[shard] != fetched {
+								kv.logger.Panicf("%v-%v: inconsistent configured state. partialState={%v}, curr_config=%v, pre_config=%v, affected=%v.\n", kv.gid, kv.me, partialState, kv.ConfiguredConfig, kv.PreConfig, kv.AffectShards)
+							}
 							kv.AffectShards[shard] = false
-						} else {
-							duplicated = true
-							break
 						}
+						duplicated = !fetched
+					} else {
+						duplicated = false
 					}
 
 					var missingShards []int
@@ -637,8 +644,6 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 							missingShards = append(missingShards, shard)
 						}
 					}
-					result = missingShards
-
 					if duplicated {
 						kv.logger.Printf("%v-%v: receive duplicated partialState, already updated. partialState={%v}, curr_config=%v, pre_config=%v, affected_shards=%v.\n", kv.gid, kv.me, partialState, kv.ConfiguredConfig, kv.PreConfig, kv.AffectShards)
 					} else {
@@ -655,6 +660,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 							kv.logger.Printf("%v-%v: still wait for state, missingShards=%v, partialState=%v.\n", kv.gid, kv.me, missingShards, partialState)
 						}
 					}
+					result = missingShards
 				}
 
 			}
@@ -681,21 +687,21 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 		kv.lastAppliedIndex = msg.CommandIndex
 		handler, present := kv.clientHandler[command.ClientId]
 
-		kv.mu.Unlock()
-
 		if present && command.CommandId >= handler.commandId {
 			handler.mu.Lock()
-			if handler.commandId == command.CommandId {
-				handler.result = lastAppliedCommand.Result
-				handler.Err = lastAppliedCommand.Err
-			} else {
-				handler.result = nil
-				handler.Err = ErrOutdatedRPC
-				kv.logger.Printf("%v-%v: outdated RPC, handler=%v, op=%v", kv.gid, kv.me, handler, command)
+			if !handler.finished {
+				if handler.commandId == command.CommandId {
+					handler.result = lastAppliedCommand.Result
+					handler.Err = lastAppliedCommand.Err
+				} else {
+					handler.result = nil
+					handler.Err = ErrOutdatedRPC
+					kv.logger.Printf("%v-%v: outdated RPC, handler=%v, op=%v", kv.gid, kv.me, handler, command)
+				}
+				handler.finished = true
+				kv.logger.Printf("%v-%v: make client handler finished, handler=%v.\n", kv.gid, kv.me, handler)
+				handler.cond.Broadcast()
 			}
-			handler.finished = true
-			kv.logger.Printf("%v-%v: make client handler finished, handler=%v.\n", kv.gid, kv.me, handler)
-			handler.cond.Broadcast()
 			handler.mu.Unlock()
 		}
 
@@ -704,7 +710,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			snapshot := kv.encodeState(kv.PreConfig, kv.ConfiguredConfig, kv.CurrState, kv.GetStateMap, kv.AffectShards)
 			kv.rf.Snapshot(kv.lastAppliedIndex, snapshot)
 		}
-
+		kv.mu.Unlock()
 	} else {
 		kv.logger.Printf("%v-%v: detect applyCh close, return, msg=%v.\n", kv.gid, kv.me, msg)
 		return

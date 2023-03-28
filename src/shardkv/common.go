@@ -4,6 +4,9 @@ import (
 	"6.824/raft"
 	"6.824/shardctrler"
 	"fmt"
+	"log"
+	"os"
+	"sync"
 )
 
 //
@@ -189,4 +192,28 @@ type ReConfiguredReply struct {
 
 func (reply ReConfiguredReply) String() string {
 	return fmt.Sprintf("{MissingShards=%v, Err=%v}", reply.MissingShards, reply.Err)
+}
+
+type GlobalLogOutput struct {
+	mu sync.Mutex
+	fi *os.File
+}
+
+var globalLog = GlobalLogOutput{}
+
+func getLogOutput() *os.File {
+	if output := os.Getenv("shardkv_output"); output != "" {
+		globalLog.mu.Lock()
+		defer globalLog.mu.Unlock()
+		if globalLog.fi == nil {
+			fi, err := os.OpenFile(output, os.O_WRONLY|os.O_TRUNC, os.ModeAppend)
+			if err != nil {
+				log.Panicf("Error open log file: %v.", output)
+			}
+			globalLog.fi = fi
+		}
+		return globalLog.fi
+	} else {
+		return os.Stdout
+	}
 }
