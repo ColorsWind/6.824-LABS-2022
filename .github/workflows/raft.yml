@@ -3,7 +3,7 @@ on:
   push:
     branches:
       - ci
-      - main
+      - master
     paths-ignore:
       - '**.md'
   pull_request:
