@@ -436,7 +436,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	}()
 	go func() {
 		cck := MakeConfigureClerk(kv)
-		kv.logger.Printf("%v-%v: onPollConfiguration start，name=%v.\n", kv.gid, kv.me, goroutineName())
+		kv.logger.Printf("%v-%v: onPollConfiguration start, name=%v.\n", kv.gid, kv.me, goroutineName())
 		for !kv.killed() {
 			//t1 := time.Now().UnixMilli()
 			cck.onPollConfiguration()
@@ -505,6 +505,7 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 					}
 				}
 			case OpType_GET_STATE:
+				// confirm get state
 				getState := command.ExtraArgs.(GetState)
 				if getState.Confirm {
 					for _, shard := range getState.Shards {
@@ -523,6 +524,9 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 					if result == nil {
 						result = KVState{}
 					}
+				} else if kv.PreConfig.Num < getState.ConfigNum+1 {
+					// get state, but config fall behind, state not created
+					result = ErrShardCreate
 				} else {
 					getStateKVMap := make(map[string]string)
 					getStateAppliedMap := make(map[int64]ExecutedOp)

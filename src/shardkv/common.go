@@ -37,6 +37,7 @@ const (
 	ErrNotAvailableYet = Err("ErrNotAvailableYet")
 
 	ErrShardDelete = Err("ErrShardDelete")
+	ErrShardCreate = Err("ErrShardCreate")
 )
 
 type Err string

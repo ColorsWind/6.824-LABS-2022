@@ -138,4 +138,5 @@
 6. （TestChallenge2Partial）复用(5)中的AffectShards，将一个ReConfigured拆分为多个，当AffectShards全为false时状态Sn -> Cn，其中一些细节：
 
    - GetState必须并行发送，避免一个Group的故障影响对其他Group的GetState的执行；
-   - 在configure_client.go中需要维护多个ClientId和CommandId，必须保证一个ClientId同一时刻只能发送一个RPC请求。
+   - 在configure_client.go中需要维护多个ClientId和CommandId，必须保证一个ClientId同一时刻只能发送一个RPC请求；
+   - GetState失败可能有两个原因：Configuration落后State还未准备好、另一个Client已经发送GetStateOK。不能忽略第一个原因，如果采用fork-join风格的设计，会由于RPC超时时间太长而出错。

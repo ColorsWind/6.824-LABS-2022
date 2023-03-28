@@ -146,25 +146,32 @@ func (ck *ConfigureClerk) onPollConfiguration() {
 				clientId := ck.mutipleClientId[anyShard]
 				commandId := &ck.mutipleCommandId[anyShard]
 				go func() {
-					state, err := ck.sendGetState(clientId, atomic.AddInt64(commandId, 1), configuredConfig, gid, shards, false)
-					switch err {
-					case OK:
-						ck.logger.Printf("%v-%v: get state success, gid=%v, shards=%v.\n", ck.gid, ck.me, gid, shards)
-						missing, err := ck.sendReConfigured(clientId, atomic.AddInt64(commandId, 1), PartialConfiguration{shards, KVState{preConfig.Num, state.KVMap, state.LastAppliedCommandMap}})
-						ck.logger.Printf("%v-%v: re-configured, shards=%v, missing=%v, err=%v.\n", ck.gid, ck.me, shards, missing, err)
-						if err == OK {
-							ch <- len(missing)
-							_, err = ck.sendGetState(clientId, atomic.AddInt64(commandId, 1), configuredConfig, gid, shards, true)
-							ck.logger.Printf("%v-%v: get state confirm, err=%v.\n", ck.gid, ck.me, err)
-						} else {
-							ch <- -1
+					for {
+						state, err := ck.sendGetState(clientId, atomic.AddInt64(commandId, 1), configuredConfig, gid, shards, false)
+						switch err {
+						case OK:
+							ck.logger.Printf("%v-%v: get state success, gid=%v, shards=%v.\n", ck.gid, ck.me, gid, shards)
+							missing, err := ck.sendReConfigured(clientId, atomic.AddInt64(commandId, 1), PartialConfiguration{shards, KVState{preConfig.Num, state.KVMap, state.LastAppliedCommandMap}})
+							ck.logger.Printf("%v-%v: re-configured, shards=%v, missing=%v, err=%v.\n", ck.gid, ck.me, shards, missing, err)
+							if err == OK {
+								ch <- len(missing)
+								_, err = ck.sendGetState(clientId, atomic.AddInt64(commandId, 1), configuredConfig, gid, shards, true)
+								ck.logger.Printf("%v-%v: get state confirm, err=%v.\n", ck.gid, ck.me, err)
+							} else {
+								ch <- -1
+							}
+							return
+						case ErrShardCreate:
+							ck.logger.Printf("%v-%v: get state fail, gid=%v, shards=%v, but get err=%v, state=%v, shardkv's config is fall behind, retry after 100ms.\n", ck.gid, ck.me, gid, shards, err, state)
+							time.Sleep(100 * time.Millisecond)
+							continue
+						case ErrShardDelete:
+							ck.logger.Printf("%v-%v: get state fail, gid=%v, shards=%v, but get err=%v, state=%v, maybe other shardkv already updated.\n", ck.gid, ck.me, gid, shards, err, state)
+							ch <- -2
+							return
+						default:
+							ck.logger.Panicf("%v-%v: get state fail, gid=%v, shards=%v, but get err=%v, state=%v, maybe other shardkv already updated.\n", ck.gid, ck.me, gid, shards, err, state)
 						}
-
-					case ErrShardDelete:
-						ck.logger.Printf("%v-%v: get state fail, gid=%v, shards=%v, but get err=%v, state=%v, maybe other shardkv already updated.\n", ck.gid, ck.me, gid, shards, err, state)
-						ch <- -2
-					default:
-						ck.logger.Panicf("%v-%v: get state fail, gid=%v, shards=%v, but get err=%v, state=%v, maybe other shardkv already updated.\n", ck.gid, ck.me, gid, shards, err, state)
 					}
 				}()
 
@@ -207,10 +214,10 @@ func (ck *ConfigureClerk) sendGetState(clientId int64, commandId int64, lastConf
 				srv := ck.make_end(servers[si])
 				var reply GetStateReply
 				ok := srv.Call("ShardKV.GetState", &args, &reply)
-				ck.logger.Printf("%v-%v call get finish, server='%v', args=%v, reply=%v, ok=%v.\n", ck.gid, ck.me, servers[si], args, reply, ok)
-				if ok && (reply.Err == OK || reply.Err == ErrShardDelete) {
+				ck.logger.Printf("%v-%v: call get finish, server='%v', args=%v, reply=%v, ok=%v.\n", ck.gid, ck.me, servers[si], args, reply, ok)
+				if ok && (reply.Err == OK || reply.Err == ErrShardDelete || reply.Err == ErrShardCreate) {
 					// successfully get state
-					ck.logger.Printf("%v-%v: finish get state ok, args=%v, reply=%v.", ck.gid, ck.me, args, reply)
+					ck.logger.Printf("%v-%v: finish get state, args=%v, reply=%v.", ck.gid, ck.me, args, reply)
 					return reply.KVState, reply.Err
 				}
 				if ok && reply.Err == ErrWrongGroup {
