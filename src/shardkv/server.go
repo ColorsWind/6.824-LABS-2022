@@ -5,7 +5,6 @@ import (
 	"6.824/shardctrler"
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"sync/atomic"
@@ -294,11 +293,6 @@ func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
 	atomic.StoreInt32(&kv.dead, 1)
-	go func() {
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-
-	}()
 
 }
 
@@ -405,7 +399,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.logger = log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
-	kv.logger.SetOutput(ioutil.Discard)
+	//kv.logger.SetOutput(ioutil.Discard)
 
 	// You may need initialization code here.
 
@@ -476,7 +470,6 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 		kv.logger.Printf("%v-%v: update lastAppliedIndex: %v\n", kv.gid, kv.me, kv.CurrState.LastAppliedCommandMap)
 	} else if msg.CommandValid {
 		kv.mu.Lock()
-		defer kv.mu.Unlock()
 		command := msg.Command.(Op)
 		lastAppliedCommand := kv.CurrState.LastAppliedCommandMap[command.ClientId]
 		// update state machine
@@ -685,7 +678,11 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			kv.logger.Panicf("%v-%v: receive msg with invalid command id. msg=%v, lastAppliedMap=%v.", kv.gid, kv.me, msg, lastAppliedCommand.CommandId)
 		}
 
+		kv.lastAppliedIndex = msg.CommandIndex
 		handler, present := kv.clientHandler[command.ClientId]
+
+		kv.mu.Unlock()
+
 		if present && command.CommandId >= handler.commandId {
 			handler.mu.Lock()
 			if handler.commandId == command.CommandId {
@@ -701,7 +698,6 @@ func (kv *ShardKV) onApplyMsg(msg raft.ApplyMsg) {
 			handler.cond.Broadcast()
 			handler.mu.Unlock()
 		}
-		kv.lastAppliedIndex = msg.CommandIndex
 
 		if kv.maxraftstate > 0 && kv.persister.RaftStateSize() > kv.maxraftstate {
 			kv.logger.Printf("%v-%v: raft state size greater maxraftstate(%v > %v), trim log.\n", kv.gid, kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
