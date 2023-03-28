@@ -7,6 +7,10 @@
 - [x] Lab 3: Fault-tolerant Key/Value Service
 - [x] Lab 4: Sharded Key/Value Service (+ challenge exercises)
 
+## 测试结果
+[![Test MapReduce](https://github.com/ColorsWind/6.824-LABS-2022/actions/workflows/mr.yml/badge.svg)](https://github.com/ColorsWind/6.824-LABS-2022/actions/workflows/mr.yml)
+[![Test Raft](https://github.com/ColorsWind/6.824-LABS-2022/actions/workflows/raft.yml/badge.svg)](https://github.com/ColorsWind/6.824-LABS-2022/actions/workflows/raft.yml)
+
 ## Lab1  MapReduce
 
 1. RPC请求只能由worker向coordinator发送；
